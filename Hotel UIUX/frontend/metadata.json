@@ -1,0 +1,5 @@
+{
+  "name": "VTR Device & Accounting Manager 7.9.3",
+  "description": "A comprehensive system for device management (GPS/Camera) integrated with Vietnamese Accounting Standard (TT133). Features automated invoicing, contract renewals, inventory tracking, and AI-powered financial insights.",
+  "requestFramePermissions": []
+}

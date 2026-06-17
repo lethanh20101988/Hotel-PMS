@@ -1,0 +1,280 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model AppState {
+  id        Int      @id
+  data      Json
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model User {
+  id           String   @id @default(cuid())
+  username     String?  @unique
+  email        String?  @unique
+  phone        String?  @unique
+  passwordHash String
+  role         String   @default("user") // user | admin
+  roleId       String?
+  companyId    String?
+  status       String   @default("active") // active | disabled
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  lastLoginAt  DateTime?
+
+  roleRef Role?    @relation(fields: [roleId], references: [id], onDelete: SetNull)
+  company Company? @relation(fields: [companyId], references: [id], onDelete: SetNull)
+
+  @@index([roleId])
+  @@index([companyId])
+}
+
+model Company {
+  id        String   @id @default(cuid())
+  name      String
+  slug      String   @unique
+  status    String   @default("active")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  users       User[]
+  roles       Role[]
+  permissions Permission[]
+  auditLogs   AuditLog[]
+}
+
+model Role {
+  id          String   @id @default(cuid())
+  companyId   String?
+  name        String
+  description String?
+  isSystem    Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  company     Company?         @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  users       User[]
+  permissions RolePermission[]
+
+  @@unique([companyId, name])
+  @@index([companyId])
+}
+
+model Permission {
+  id          String   @id @default(cuid())
+  companyId   String?
+  name        String
+  description String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  company Company?         @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  roles   RolePermission[]
+
+  @@unique([companyId, name])
+  @@index([companyId])
+}
+
+model RolePermission {
+  roleId       String
+  permissionId String
+  createdAt    DateTime @default(now())
+
+  role       Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, permissionId])
+  @@index([permissionId])
+}
+
+model AuditLog {
+  id           String   @id @default(cuid())
+  companyId    String?
+  actorUserId  String?
+  action       String
+  resource     String
+  resourceId   String?
+  before       Json?
+  after        Json?
+  ip           String?
+  userAgent    String?
+  createdAt    DateTime @default(now())
+
+  company Company? @relation(fields: [companyId], references: [id], onDelete: SetNull)
+
+  @@index([companyId])
+  @@index([actorUserId])
+  @@index([resource])
+}
+
+model ApprovalRequest {
+  id              String   @id @default(cuid())
+  companyId       String?
+  resource        String
+  resourceId      String?
+  payload         Json
+  status          String   @default("PENDING_MANAGER") // PENDING_MANAGER | PENDING_ADMIN | APPROVED | REJECTED
+  requestedById   String
+  managerById     String?
+  adminById       String?
+  requestedAt     DateTime @default(now())
+  managerAt       DateTime?
+  adminAt         DateTime?
+  rejectionReason String?
+
+  @@index([companyId])
+  @@index([requestedById])
+  @@index([status])
+}
+
+model Otp {
+  id          String   @id @default(cuid())
+  target      String
+  targetType  String
+  purpose     String
+  codeHash    String
+  expiresAt   DateTime
+  verified    Boolean  @default(false)
+  consumedAt  DateTime?
+  attempts    Int      @default(0)
+  createdAt   DateTime @default(now())
+  verifiedAt  DateTime?
+
+  @@index([target])
+  @@index([target, purpose])
+  @@index([createdAt])
+}
+
+model QrSession {
+  id          String   @id
+  status      String   @default("pending")
+  userId      String?
+  expiresAt   DateTime
+  consumedAt  DateTime?
+  createdAt   DateTime @default(now())
+  confirmedAt DateTime?
+
+  @@index([status])
+  @@index([expiresAt])
+}
+
+/// Dữ liệu tờ khai 01/GTGT + KHBS + PL2-04 nháp — thay thế lưu trình duyệt (localStorage) khi dùng API.
+/// payload: { snapshots, baselines, pl204ByPeriod, workingDrafts, version? }
+model Gtgt01Data {
+  id        Int      @id @default(1)
+  payload   Json
+  updatedAt DateTime @updatedAt
+}
+
+model OpeningBalance {
+  yearKey    String
+  accountCode String
+  debit      BigInt   @default(0)
+  credit     BigInt   @default(0)
+  originMode String   @default("MANUAL")
+  readOnly   Boolean  @default(false)
+  lockReason String?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  debtDetails DebtDetail[]
+
+  @@id([yearKey, accountCode])
+  @@index([yearKey])
+}
+
+model DebtDetail {
+  id                  String   @id
+  yearKey             String
+  kind                String
+  accountCode         String
+  partnerId           String?
+  partnerCode         String?
+  partnerName         String
+  invoiceNo           String
+  revenueType         String
+  amount              BigInt   @default(0)
+  dueDate             String?
+  note                String?
+  sourceInvoiceId     String?
+  sourceInvoiceNumber String?
+  sourceInvoiceDate   String?
+  sourceYearKey       String?
+  openingYearKey      String?
+  originMode          String   @default("MANUAL")
+  readOnly            Boolean  @default(false)
+  lockReason          String?
+  syncStatus          String   @default("MATCHED")
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  openingBalance OpeningBalance @relation(fields: [yearKey, accountCode], references: [yearKey, accountCode], onDelete: Cascade)
+
+  @@index([yearKey, kind])
+  @@index([yearKey, accountCode])
+  @@index([sourceInvoiceId])
+}
+
+model OpeningBalanceRollover {
+  yearKey            String   @id
+  sourceYearKey      String
+  generatedAt        DateTime
+  lockedAccountCodes Json?
+  lockedDebtKinds    Json?
+  updatedAt          DateTime @updatedAt
+}
+
+/// Pipeline nhập hóa đơn từ Excel / thư mục theo dõi — staging trước khi ghi vào AppState.
+/// payload: InvoicePipelineBatchPayload (JSON, versioned)
+model InvoiceImportBatch {
+  id          String   @id @default(cuid())
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  fileName    String
+  filePath    String?
+  /// NEW | PROCESSING | DONE | ERROR (hàng đợi file)
+  queueStatus String   @default("NEW")
+  /// STAGED | VALIDATED | POSTED | ERROR (nghiệp vụ)
+  batchStatus String   @default("STAGED")
+  payload     Json
+}
+
+/// Thông báo hệ thống (import Excel / pipeline HĐ) — toast + dashboard + log
+model Notification {
+  id        String    @id @default(cuid())
+  createdAt DateTime  @default(now())
+  readAt    DateTime?
+  /// FILE_RECEIVED | IMPORT_OK | IMPORT_ERROR | ACTION_REQUIRED
+  kind      String
+  title     String
+  body      String
+  data      Json
+}
+
+/// Transactional outbox — đảm bảo không mất realtime event khi crash sau DB commit.
+/// Worker đọc pending → publish Redis → status = sent.
+model EventOutbox {
+  id        String   @id @default(cuid())
+  /// UUID idempotent — wire WS `eventId`, Redis envelope `id` (unique, không trùng khi retry)
+  eventId   String   @unique @map("event_id")
+  /// order_created | order_updated | notification_created
+  eventType String   @map("event_type")
+  payload   Json
+  /// pending | processing | sent | failed
+  status    String   @default("pending")
+  attempts  Int      @default(0)
+  lastError String?
+  createdAt DateTime @default(now()) @map("created_at")
+  sentAt    DateTime? @map("sent_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([status, createdAt])
+  @@index([eventType])
+  @@map("event_outbox")
+}

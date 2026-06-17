@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">MP Hotel</string>
+    <string name="title_activity_main">MP Hotel</string>
+    <string name="package_name">com.mphotel.app</string>
+    <string name="custom_url_scheme">com.mphotel.app</string>
+</resources>

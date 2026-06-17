@@ -1,0 +1,71 @@
+# Docker Compose project names cannot contain spaces or Vietnamese accents, so
+# this stack uses a Docker-safe name and keeps the requested display name in labels.
+name: du-an-sme-hotel
+
+x-sme-hotel-labels: &sme-hotel-labels
+  com.sme-hotel.display-name: "Dự án SME Hotel"
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: sme_hotel
+      POSTGRES_PASSWORD: sme_hotel_dev
+      POSTGRES_DB: sme_hotel
+    labels: *sme-hotel-labels
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sme_hotel -d sme_hotel"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  backend:
+    build:
+      context: "./Hotel UIUX/backend"
+    labels: *sme-hotel-labels
+    environment:
+      PORT: "4000"
+      DATABASE_URL: "postgresql://sme_hotel:sme_hotel_dev@postgres:5432/sme_hotel?schema=public"
+      FRONTEND_ORIGIN: "${SME_HOTEL_PUBLIC_URL:-http://localhost:${SME_HOTEL_HTTP_PORT:-3180}}"
+      REDIS_URL: "redis://redis:6379"
+      OTP_TTL_SECONDS: "300"
+      JWT_EXPIRES_SECONDS: "604800"
+      JWT_SECRET: "${SME_HOTEL_JWT_SECRET:-dev-secret-change-me}"
+      BACKUP_DIR: "/data/Backup"
+      INVOICE_INCOMING_DIR: "/data/invoice-incoming"
+      INVOICE_INCOMING_HOST_PATH: "E:/Dự án SME Hotel/Hotel data/invoice-incoming"
+      BOOTSTRAP_ADMIN_IDENTIFIER: "admin@victory.local"
+      BOOTSTRAP_ADMIN_PASSWORD: "${SME_HOTEL_BOOTSTRAP_ADMIN_PASSWORD:-}"
+      SUPER_ADMIN_EMAIL: "${SME_HOTEL_SUPER_ADMIN_EMAIL:-}"
+      SUPER_ADMIN_PASSWORD: "${SME_HOTEL_SUPER_ADMIN_PASSWORD:-}"
+    volumes:
+      - "./Hotel data:/data"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+  frontend:
+    build:
+      context: "./Hotel UIUX"
+      dockerfile: "infra/docker/Dockerfile.frontend"
+    labels: *sme-hotel-labels
+    depends_on:
+      - backend
+    ports:
+      - "${SME_HOTEL_HTTP_PORT:-3180}:80"
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    labels: *sme-hotel-labels
+    volumes:
+      - redis_data:/data
+
+volumes:
+  postgres_data:
+  redis_data:

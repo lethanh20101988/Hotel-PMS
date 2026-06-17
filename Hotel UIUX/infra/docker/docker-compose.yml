@@ -1,0 +1,102 @@
+# Chạy từ thư mục Hotel UIUX:
+#   docker compose -f infra/docker/docker-compose.yml up --build
+# PostgreSQL + file backup/XML: bind "Dự án SME Hotel/Hotel data" → /data
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: sme_hotel
+      POSTGRES_PASSWORD: sme_hotel_dev
+      POSTGRES_DB: sme_hotel
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sme_hotel -d sme_hotel"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  migrate:
+    build:
+      context: ../../backend
+    entrypoint: ["./docker-entrypoint-migrate.sh"]
+    environment:
+      DATABASE_URL: "postgresql://sme_hotel:sme_hotel_dev@postgres:5432/sme_hotel?schema=public"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  backend:
+    build:
+      context: ../../backend
+    # Scale ngang (không pm2): docker compose up -d --scale backend=3
+    # Redis Pub/Sub đồng bộ WS giữa các replica — xem docs/REALTIME-SCALE-ARCHITECTURE.md
+    environment:
+      PORT: "4000"
+      DATABASE_URL: "postgresql://sme_hotel:sme_hotel_dev@postgres:5432/sme_hotel?schema=public"
+      FRONTEND_ORIGIN: "http://localhost:3180"
+      REDIS_URL: "redis://redis:6379"
+      OTP_TTL_SECONDS: "300"
+      JWT_EXPIRES_SECONDS: "604800"
+      JWT_SECRET: "dev-secret-change-me"
+      BACKUP_DIR: "/data/Backup"
+      INVOICE_INCOMING_DIR: "/data/invoice-incoming"
+      # Gợi ý đường dẫn trên máy host (hiển thị UI): copy XML vào thư mục con tax-einvoice-xml
+      INVOICE_INCOMING_HOST_PATH: "E:/Dự án SME Hotel/Hotel data/invoice-incoming/tax-einvoice-xml"
+      BOOTSTRAP_ADMIN_IDENTIFIER: "admin@victory.local"
+      BOOTSTRAP_ADMIN_PASSWORD: ""
+      # === Tài khoản super admin & khôi phục mật khẩu khi quên ===
+      # Khi quên mật khẩu: điền SUPER_ADMIN_PASSWORD (mật khẩu mới), đặt SUPER_ADMIN_RESET="1",
+      # chạy lại docker → backend tự đặt lại mật khẩu lúc khởi động. Sau đó đặt lại
+      # SUPER_ADMIN_RESET="0" (và xóa mật khẩu) rồi chạy lại để không bị ghi đè ở các lần sau.
+      SUPER_ADMIN_EMAIL: "hanoivictory@gmail.com"
+      SUPER_ADMIN_PASSWORD: ""
+      SUPER_ADMIN_RESET: "0"
+    volumes:
+      - E:/Dự án SME Hotel/Hotel data:/data
+    # API chỉ qua nginx frontend: http://localhost:3180/api/
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+  event-dispatcher:
+    build:
+      context: ../../backend
+    entrypoint: ["./docker-entrypoint-worker.sh"]
+    environment:
+      DATABASE_URL: "postgresql://sme_hotel:sme_hotel_dev@postgres:5432/sme_hotel?schema=public"
+      REDIS_URL: "redis://redis:6379"
+      SCHEMA_WAIT_SECONDS: "180"
+      OUTBOX_POLL_INTERVAL_MS: "100"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+  frontend:
+    build:
+      context: ../..
+      dockerfile: infra/docker/Dockerfile.frontend
+    depends_on:
+      - backend
+    ports:
+      - "3180:80"
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+
+volumes:
+  postgres_data:
+  redis_data:

@@ -1,0 +1,13 @@
+node_modules
+frontend/node_modules
+frontend/dist
+backend/node_modules
+backend/dist
+backend/dev.db
+backend/.npm-cache
+.npm-cache
+.git
+storage
+generated
+audits
+dist

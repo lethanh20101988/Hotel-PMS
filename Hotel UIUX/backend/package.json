@@ -1,0 +1,43 @@
+{
+  "name": "vtr-dam-backend",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "node ./node_modules/tsx/dist/cli.mjs watch src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "start:outbox-worker": "node dist/outboxWorker.js",
+    "prisma:generate": "node ./node_modules/prisma/build/index.js generate",
+    "prisma:migrate": "node ./node_modules/prisma/build/index.js migrate dev --name init",
+    "test:lifecycle": "node scripts/lifecycle.smoke.mjs",
+    "test:rbac": "node scripts/rbacDelete.smoke.mjs",
+    "migrate:sqlite-to-pg": "node scripts/migrateSqliteToPostgres.mjs",
+    "smoke:api": "node scripts/smokeTestApi.mjs"
+  },
+  "dependencies": {
+    "@prisma/client": "^6.2.0",
+    "adm-zip": "^0.5.16",
+    "bcryptjs": "^3.0.3",
+    "chokidar": "^4.0.3",
+    "cors": "^2.8.5",
+    "express": "^4.21.2",
+    "fast-xml-parser": "^5.5.11",
+    "multer": "^2.1.1",
+    "nodemailer": "^6.9.16",
+    "qrcode": "^1.5.4",
+    "redis": "^4.7.0",
+    "ws": "^8.21.0",
+    "xlsx": "^0.18.5",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
+    "@types/multer": "^2.1.0",
+    "@types/ws": "^8.18.1",
+    "prisma": "^6.2.0",
+    "tsx": "^4.19.2",
+    "typescript": "~5.8.2"
+  }
+}

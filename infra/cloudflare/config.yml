@@ -1,0 +1,12 @@
+# Cloudflare Tunnel — mphotel.asia → localhost:3180
+# Tunnel ID và credentials-file được ghi tự động bởi setup-tunnel.ps1
+
+tunnel: REPLACE_TUNNEL_ID
+credentials-file: REPLACE_CREDENTIALS_FILE
+
+ingress:
+  - hostname: mphotel.asia
+    service: http://localhost:3180
+  - hostname: www.mphotel.asia
+    service: http://localhost:3180
+  - service: http_status:404
