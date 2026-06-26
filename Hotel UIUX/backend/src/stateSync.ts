@@ -17,6 +17,7 @@ export const DEFAULT_STATE_ROOM_ID = DEFAULT_COMPANY_ROOM_ID;
 
 export type StateChangeEvent = {
   revision: number;
+  dataVersion?: number;
   at: number;
   sourceClientId?: string;
   kinds: StateChangeKind[];
@@ -69,12 +70,15 @@ function buildStateChangeEvent(
     sourceClientId?: string;
     kinds?: StateChangeKind[];
     companyId?: string | null;
+    dataVersion?: number;
+    state?: unknown;
     entity?: EntityLifecycleMeta;
   },
 ): StateChangeEvent {
   const companyId = resolveCompanyId(opts.companyId);
   return {
     revision: rev,
+    dataVersion: opts.dataVersion,
     at: Date.now(),
     sourceClientId: opts.sourceClientId?.trim() || undefined,
     kinds: opts.kinds?.length ? opts.kinds : ["state"],
@@ -88,6 +92,8 @@ export function notifyStateChanged(opts?: {
   sourceClientId?: string;
   kinds?: StateChangeKind[];
   companyId?: string | null;
+  dataVersion?: number;
+  state?: unknown;
 }): StateChangeEvent {
   realtimeHub.wire();
   const rev = nextRevision();
@@ -98,8 +104,10 @@ export function notifyStateChanged(opts?: {
     companyId: event.companyId,
     payload: {
       revision: event.revision,
+      dataVersion: event.dataVersion,
       sourceClientId: event.sourceClientId,
       kinds: event.kinds,
+      state: opts?.state,
     },
   });
   return event;

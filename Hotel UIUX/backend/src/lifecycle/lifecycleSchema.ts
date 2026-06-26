@@ -33,6 +33,9 @@ export async function ensureLifecycleTables(prisma: PrismaClient) {
     `CREATE INDEX IF NOT EXISTS "entity_lifecycle_status_idx" ON "entity_lifecycle" ("status")`,
   );
   await prisma.$executeRawUnsafe(
+    `CREATE INDEX IF NOT EXISTS "entity_lifecycle_status_updated_idx" ON "entity_lifecycle" ("status","updated_at" DESC)`,
+  );
+  await prisma.$executeRawUnsafe(
     `CREATE INDEX IF NOT EXISTS "entity_lifecycle_purge_idx" ON "entity_lifecycle" ("status","purge_after")`,
   );
 

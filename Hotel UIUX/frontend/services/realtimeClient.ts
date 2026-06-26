@@ -10,8 +10,10 @@ export type RealtimeWireMessage = {
   at?: number;
   companyId?: string;
   revision?: number;
+  dataVersion?: number;
   kinds?: string[];
   sourceClientId?: string;
+  state?: unknown;
   payload?: {
     orderId?: string;
     companyId?: string;

@@ -13,6 +13,7 @@ const documentImport = () => import('../modules/documents/pages/DocumentPage');
 const systemImport = () => import('../modules/system/pages/SystemPage');
 const settingsImport = () => import('../modules/settings/pages/SettingsPage');
 const hotelPmsImport = () => import('../modules/hotel-pms/App');
+const deliveryImport = () => import('../modules/delivery/App');
 const report133Import = () => import('../modules/accounting/pages/Report133');
 const report58Import = () => import('../modules/accounting/pages/Report58');
 const lifecycleImport = () => import('../modules/lifecycle/LifecyclePage');
@@ -48,6 +49,7 @@ export const SettingsPage = lazy(() =>
   settingsImport().then((m) => ({ default: m.SettingsPage })),
 );
 export const HotelPmsPage = lazy(() => hotelPmsImport());
+export const DeliveryPage = lazy(() => deliveryImport());
 export const LifecyclePage = lazy(() =>
   lifecycleImport().then((m) => ({ default: m.LifecyclePage })),
 );
@@ -66,6 +68,7 @@ const UNIQUE_ROUTE_IMPORTS = [
   systemImport,
   settingsImport,
   hotelPmsImport,
+  deliveryImport,
   report133Import,
   report58Import,
   lifecycleImport,
@@ -83,6 +86,10 @@ export function preloadTab(tabId: string): void {
   }
   if (tabId.startsWith('hotel_pms_')) {
     void hotelPmsImport();
+    return;
+  }
+  if (tabId.startsWith('delivery_')) {
+    void deliveryImport();
     return;
   }
   if (tabId === 'business_result') {

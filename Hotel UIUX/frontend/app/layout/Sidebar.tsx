@@ -28,6 +28,7 @@ import {
   PanelLeftClose,
   Package,
   Hotel,
+  Truck,
   Trash2,
 } from 'lucide-react';
 import { useApp } from '../store';
@@ -56,6 +57,15 @@ const HOTEL_PMS_TAB_IDS = [
   'hotel_pms_services',
 ] as const;
 
+const DELIVERY_TAB_IDS = [
+  'delivery_dashboard',
+  'delivery_distributors',
+  'delivery_products',
+  'delivery_orders',
+  'delivery_dispatch',
+  'delivery_fleet',
+] as const;
+
 const SYSTEM_TAB_IDS = [
   'sys_company',
   'sys_users',
@@ -69,6 +79,8 @@ const SYSTEM_TAB_IDS = [
 const isDocumentTab = (tab: string) => (DOCUMENT_TAB_IDS as readonly string[]).includes(tab);
 
 const isHotelPmsTab = (tab: string) => (HOTEL_PMS_TAB_IDS as readonly string[]).includes(tab);
+
+const isDeliveryTab = (tab: string) => (DELIVERY_TAB_IDS as readonly string[]).includes(tab);
 
 const isSystemTab = (tab: string) => (SYSTEM_TAB_IDS as readonly string[]).includes(tab);
 
@@ -97,6 +109,7 @@ const TAB_ACCESS_PERMISSION: Record<string, string> = {
 const getAccessPermissionForTab = (tab: string) => {
   if (isDocumentTab(tab)) return 'access_documents';
   if (isHotelPmsTab(tab)) return 'access_hotel_pms';
+  if (isDeliveryTab(tab)) return 'access_delivery';
   if (isSystemTab(tab)) return 'access_system';
   return TAB_ACCESS_PERMISSION[tab];
 };
@@ -108,9 +121,10 @@ export const Sidebar: React.FC = () => {
   const { activeTab, setActiveTab } = useApp();
   const { mode, toggleExpandedIcons, hideSidebar } = useSidebarLayout();
   const [documentsExpanded, setDocumentsExpanded] = useState(false);
+  const [deliveryExpanded, setDeliveryExpanded] = useState(false);
   const [hotelPmsExpanded, setHotelPmsExpanded] = useState(false);
   const [systemExpanded, setSystemExpanded] = useState(false);
-  const [flyout, setFlyout] = useState<'system' | 'documents' | 'hotelPms' | null>(null);
+  const [flyout, setFlyout] = useState<'system' | 'documents' | 'delivery' | 'hotelPms' | null>(null);
   const flyoutRef = useRef<HTMLDivElement>(null);
   const [overviewHubOpen, setOverviewHubOpen] = useState(false);
   const [hubUnread, setHubUnread] = useState(0);
@@ -142,6 +156,7 @@ export const Sidebar: React.FC = () => {
   useEffect(() => {
     setSystemExpanded(isSystemTab(activeTab));
     setDocumentsExpanded(isDocumentTab(activeTab));
+    setDeliveryExpanded(isDeliveryTab(activeTab));
     setHotelPmsExpanded(isHotelPmsTab(activeTab));
   }, [activeTab]);
 
@@ -237,6 +252,12 @@ export const Sidebar: React.FC = () => {
     setFlyout(null);
   };
 
+  const handleDeliveryClick = (tab: string) => {
+    preloadTab(tab);
+    setActiveTab(tab);
+    setFlyout(null);
+  };
+
   const handleSystemClick = (tab: string) => {
     preloadTab(tab);
     setActiveTab(tab);
@@ -261,6 +282,15 @@ export const Sidebar: React.FC = () => {
   ];
 
   const catalogItem = { id: 'catalogs', label: 'Danh mục', icon: List };
+
+  const deliveryItems = [
+    { id: 'delivery_dashboard', label: 'Tổng quan' },
+    { id: 'delivery_distributors', label: 'Nhà phân phối' },
+    { id: 'delivery_products', label: 'Sản phẩm' },
+    { id: 'delivery_orders', label: 'Đơn hàng' },
+    { id: 'delivery_dispatch', label: 'Điều phối' },
+    { id: 'delivery_fleet', label: 'Đội xe & Tài xế' },
+  ];
 
   const documentItems = [
     { id: 'doc_receipt', label: 'Phiếu thu' },
@@ -304,10 +334,12 @@ export const Sidebar: React.FC = () => {
   const menuItemsAllowed = menuItems.filter((item) => canOpenTab(item.id));
   const systemItemsAllowed = systemItems.filter((item) => canOpenTab(item.id));
   const documentItemsAllowed = documentItems.filter((item) => canOpenTab(item.id));
+  const deliveryItemsAllowed = deliveryItems.filter((item) => canOpenTab(item.id));
   const hotelPmsItemsAllowed = hotelPmsItems.filter((item) => canOpenTab(item.id));
   const bottomItemsAllowed = bottomItems.filter((item) => canOpenTab(item.id));
   const canOpenSystem = systemItemsAllowed.length > 0;
   const canOpenDocuments = documentItemsAllowed.length > 0;
+  const canOpenDelivery = deliveryItemsAllowed.length > 0;
   const canOpenHotelPms = hotelPmsItemsAllowed.length > 0;
   const canOpenCatalogs = canOpenTab(catalogItem.id);
   const firstAllowedTab =
@@ -315,6 +347,7 @@ export const Sidebar: React.FC = () => {
     (canOpenSystem ? systemItemsAllowed[0]?.id : undefined) ||
     (canOpenCatalogs ? catalogItem.id : undefined) ||
     (canOpenDocuments ? documentItemsAllowed[0]?.id : undefined) ||
+    (canOpenDelivery ? deliveryItemsAllowed[0]?.id : undefined) ||
     (canOpenHotelPms ? hotelPmsItemsAllowed[0]?.id : undefined) ||
     bottomItemsAllowed[0]?.id ||
     'dashboard';
@@ -586,6 +619,81 @@ export const Sidebar: React.FC = () => {
                     type="button"
                     onMouseEnter={() => preloadTab(item.id)}
                     onClick={() => handleDocumentClick(item.id)}
+                    className={`w-full flex items-center gap-2 px-3 py-2 text-sm rounded-lg transition-all ${
+                      activeTab === item.id ? 'bg-blue-600/30 text-blue-300' : 'text-slate-300 hover:bg-slate-800'
+                    }`}
+                  >
+                    <CircleDot className={`w-2 h-2 shrink-0 ${activeTab === item.id ? 'fill-blue-300' : 'fill-slate-500'}`} />
+                    <span className="text-left">{item.label}</span>
+                  </button>
+                ))}
+              </FlyoutPanel>
+            </div>
+          )}
+        </div>}
+
+        {/* Giao hàng */}
+        {canOpenDelivery && <div className="pt-2 relative">
+          {expanded ? (
+            <>
+              <button
+                type="button"
+                onMouseEnter={() => preloadTab(deliveryItemsAllowed[0]?.id || 'delivery_dashboard')}
+                onClick={() => setDeliveryExpanded(!deliveryExpanded)}
+                className={`w-full flex items-center justify-between px-4 py-3 rounded-xl transition-all hover:bg-slate-800 hover:text-white ${isDeliveryTab(activeTab) ? 'text-white' : ''}`}
+              >
+                <div className="flex items-center gap-3 min-w-0">
+                  <Truck className="w-5 h-5 shrink-0" />
+                  <span className="truncate">Giao hàng</span>
+                </div>
+                {deliveryExpanded ? <ChevronDown className="w-4 h-4 shrink-0" /> : <ChevronRight className="w-4 h-4 shrink-0" />}
+              </button>
+              {deliveryExpanded && (
+                <div className="space-y-1 pl-4 mt-1 border-l-2 border-slate-800 ml-6">
+                  {deliveryItemsAllowed.map(item => (
+                    <button
+                      key={item.id}
+                      type="button"
+                      onMouseEnter={() => preloadTab(item.id)}
+                      onClick={() => handleDeliveryClick(item.id)}
+                      className={`w-full flex items-center gap-2 px-4 py-2 rounded-lg text-sm transition-all ${
+                        activeTab === item.id
+                          ? 'bg-blue-600/20 text-blue-400 font-medium'
+                          : 'hover:text-white text-slate-400'
+                      }`}
+                    >
+                      <CircleDot className={`w-2 h-2 shrink-0 ${activeTab === item.id ? 'fill-blue-400' : 'fill-slate-500'}`} />
+                      <span className="text-left truncate">{item.label}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </>
+          ) : (
+            <div className="relative flex justify-center">
+              <button
+                type="button"
+                title="Giao hàng"
+                onMouseEnter={() => preloadTab(deliveryItemsAllowed[0]?.id || 'delivery_dashboard')}
+                onClick={() => setFlyout(f => (f === 'delivery' ? null : 'delivery'))}
+                className={`w-full flex justify-center px-0 py-3 rounded-xl transition-all ${
+                  isDeliveryTab(activeTab) || flyout === 'delivery'
+                    ? 'bg-blue-600 text-white shadow-lg'
+                    : 'hover:bg-slate-800 hover:text-white'
+                }`}
+              >
+                <Truck className="w-5 h-5" />
+              </button>
+              <FlyoutPanel open={flyout === 'delivery'}>
+                <div className="px-2 text-[10px] font-black uppercase tracking-wider text-slate-500 border-b border-slate-800 pb-2 mb-1">
+                  Giao hàng
+                </div>
+                {deliveryItemsAllowed.map(item => (
+                  <button
+                    key={item.id}
+                    type="button"
+                    onMouseEnter={() => preloadTab(item.id)}
+                    onClick={() => handleDeliveryClick(item.id)}
                     className={`w-full flex items-center gap-2 px-3 py-2 text-sm rounded-lg transition-all ${
                       activeTab === item.id ? 'bg-blue-600/30 text-blue-300' : 'text-slate-300 hover:bg-slate-800'
                     }`}

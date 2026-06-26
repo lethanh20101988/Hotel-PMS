@@ -1,8 +1,20 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
-import { ChevronDown, Download, FileSpreadsheet, Printer, X } from 'lucide-react';
+import {
+  ChevronDown,
+  Download,
+  FileSpreadsheet,
+  Gauge,
+  Printer,
+  X,
+} from 'lucide-react';
 import { Pagination } from '@shared/components/Pagination';
 import { loadXlsx } from '@shared/utils/lazyXlsx';
 import { useApp } from '../../../app/store';
+import {
+  MANAGEMENT_REPORT_ITEMS,
+  ManagementReportsContent,
+  type ManagementReportType,
+} from './Report133';
 import type {
   AccountingRegimeConfig,
   Asset,
@@ -83,6 +95,11 @@ type Tt58ReportType =
   | 'S4C_DNSN'
   | 'S4D_DNSN';
 
+type ActiveReportId = Tt58ReportType | ManagementReportType;
+
+const isManagementReport = (id: ActiveReportId): id is ManagementReportType =>
+  String(id).startsWith('MGMT_');
+
 type Tt58DropdownGroupId = 'bctc' | 'tax' | 'detail' | 'taxOther';
 
 const DROPDOWN_GROUPS: {
@@ -96,6 +113,16 @@ const DROPDOWN_GROUPS: {
   { id: 'detail', title: 'Sổ chi tiết', placeholder: 'Chọn sổ chi tiết', reportGroup: 'Sổ chi tiết' },
   { id: 'taxOther', title: 'Sổ thuế', placeholder: 'Chọn sổ thuế khác', reportGroup: 'Sổ thuế' },
 ];
+
+/** Chiều ngang ô chọn — co theo nội dung, không chia đều 4 cột full width */
+const DROPDOWN_GROUP_WIDTH: Record<Tt58DropdownGroupId, string> = {
+  bctc: 'w-full sm:w-[min(100%,21rem)]',
+  tax: 'w-full sm:w-[min(100%,15.5rem)]',
+  detail: 'w-full sm:w-[min(100%,14.5rem)]',
+  taxOther: 'w-full sm:w-[min(100%,13rem)]',
+};
+
+const MGMT_SELECT_WIDTH = 'w-full sm:w-[min(100%,21rem)]';
 
 const REPORT_ITEMS: { id: Tt58ReportType; label: string; group: string }[] = [
   { id: 'B01_DNSN', label: 'B01-DNSN: Tình hình tài chính', group: 'Báo cáo tài chính' },
@@ -1621,19 +1648,26 @@ export const Report58: React.FC = () => {
     openingBalanceAccounts,
     cashFlowOpening,
     assets,
+    devices,
+    customers,
+    suppliers,
   } = useApp();
   const assetList = asArray<Asset>(assets);
   const accountingRegime = systemConfig?.accountingRegime;
   const tt58Profile = accountingRegime?.tt58TaxBookProfile;
   const salesInvoices = asArray<Invoice>(invoices);
+  const safeDevices = asArray(devices);
+  const safeCustomers = asArray(customers);
+  const safeSuppliers = asArray(suppliers);
   const entries = asArray<JournalEntry>(journalEntries);
   const safeFY = useMemo<FinancialYear>(() => {
     if (financialYear?.startDate && financialYear?.endDate) return financialYear;
     const y = new Date().getFullYear();
     return { startDate: `${y}-01-01`, endDate: `${y}-12-31` };
   }, [financialYear]);
-  const [activeReport, setActiveReport] = useState<Tt58ReportType>('B01_DNSN');
+  const [activeReport, setActiveReport] = useState<ActiveReportId>('B01_DNSN');
   const [openDropdown, setOpenDropdown] = useState<Tt58DropdownGroupId | null>(null);
+  const [mgmtDropdownOpen, setMgmtDropdownOpen] = useState(false);
   const [ledgerModalOpen, setLedgerModalOpen] = useState(false);
   const [ledgerPage, setLedgerPage] = useState(1);
   const [ledgerPageSize, setLedgerPageSize] = useState<LedgerPageSize>(20);
@@ -1674,14 +1708,31 @@ export const Report58: React.FC = () => {
     [signatures, updateSignatures],
   );
 
-  const activeReportLabel =
-    REPORT_ITEMS.find((x) => x.id === activeReport)?.label || activeReport;
+  const activeReportLabel = isManagementReport(activeReport)
+    ? MANAGEMENT_REPORT_ITEMS.find((x) => x.id === activeReport)?.label || activeReport
+    : REPORT_ITEMS.find((x) => x.id === activeReport)?.label || activeReport;
+
+  const mgmtMenuActive = isManagementReport(activeReport);
+
+  const mgmtHasData = useMemo(
+    () => ({
+      MGMT_REVENUE: salesInvoices.length > 0,
+      MGMT_RENEWALS: safeDevices.some(
+        (device) => Array.isArray(device.renewalHistory) && device.renewalHistory.length > 0,
+      ),
+      MGMT_AR: salesInvoices.length > 0 || safeCustomers.length > 0,
+      MGMT_AP: salesInvoices.length > 0 || safeSuppliers.length > 0,
+      MGMT_PROFIT: salesInvoices.length > 0,
+      MGMT_PERFORMANCE: safeDevices.length > 0,
+    }),
+    [salesInvoices.length, safeDevices, safeCustomers.length, safeSuppliers.length],
+  );
 
   const ledgerViewConfig = useMemo(
     () =>
-      isTt58LedgerReport(activeReport)
+      !isManagementReport(activeReport) && isTt58LedgerReport(activeReport as Tt58ReportType)
         ? buildLedgerViewConfig(
-            activeReport,
+            activeReport as Tt58ReportType,
             companyInfo,
             safeFY,
             entries,
@@ -1717,10 +1768,15 @@ export const Report58: React.FC = () => {
     ],
   );
 
-  const selectReport = (id: Tt58ReportType) => {
+  const selectReport = (id: ActiveReportId) => {
     setActiveReport(id);
     setOpenDropdown(null);
+    setMgmtDropdownOpen(false);
     setLedgerPage(1);
+    if (isManagementReport(id)) {
+      setLedgerModalOpen(false);
+      return;
+    }
     if (isTt58LedgerReport(id)) {
       setLedgerModalOpen(true);
     } else {
@@ -1728,19 +1784,24 @@ export const Report58: React.FC = () => {
     }
   };
 
+  const selectTt58Report = (id: Tt58ReportType) => selectReport(id);
+
   useEffect(() => {
     setLedgerPage(1);
   }, [activeReport, ledgerPageSize]);
 
   useEffect(() => {
-    if (!openDropdown) return;
+    if (!openDropdown && !mgmtDropdownOpen) return;
     const onPointerDown = (e: MouseEvent) => {
       const el = navRef.current;
-      if (el && !el.contains(e.target as Node)) setOpenDropdown(null);
+      if (el && !el.contains(e.target as Node)) {
+        setOpenDropdown(null);
+        setMgmtDropdownOpen(false);
+      }
     };
     document.addEventListener('mousedown', onPointerDown);
     return () => document.removeEventListener('mousedown', onPointerDown);
-  }, [openDropdown]);
+  }, [openDropdown, mgmtDropdownOpen]);
 
   const getDropdownButtonLabel = (group: (typeof DROPDOWN_GROUPS)[number]) => {
     const activeInGroup = REPORT_ITEMS.find(
@@ -1753,6 +1814,9 @@ export const Report58: React.FC = () => {
     REPORT_ITEMS.some((item) => item.group === group.reportGroup && item.id === activeReport);
 
   const renderContent = () => {
+    if (isManagementReport(activeReport)) {
+      return <ManagementReportsContent reportId={activeReport} selectedYear={year} />;
+    }
     if (activeReport === 'B01_DNSN') {
       return (
         <ReportShell formNo="B01-DNSN" title="BÁO CÁO TÌNH HÌNH TÀI CHÍNH" subtitle={`Năm: ${year}`} companyInfo={companyInfo}>
@@ -1789,10 +1853,14 @@ export const Report58: React.FC = () => {
   };
 
   const exportExcel = async () => {
+    if (isManagementReport(activeReport)) {
+      window.alert('Xuất Excel cho báo cáo quản trị: dùng chức năng xuất trong từng báo cáo (nếu có).');
+      return;
+    }
     await exportRowsToExcel(
-      activeReport,
+      activeReport as Tt58ReportType,
       getExcelRows(
-        activeReport,
+        activeReport as Tt58ReportType,
         entries,
         safeFY,
         companyInfo,
@@ -1942,14 +2010,14 @@ export const Report58: React.FC = () => {
           </div>
         </div>
 
-        <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        <div className="mt-5 flex flex-wrap items-start gap-x-6 gap-y-4">
           {DROPDOWN_GROUPS.map((group) => {
             const items = REPORT_ITEMS.filter((item) => item.group === group.reportGroup);
             const isOpen = openDropdown === group.id;
             const sectionActive = isGroupActive(group);
             return (
-              <div key={group.id} className="relative min-w-0">
-                <p className="mb-1 text-[10px] font-black uppercase tracking-wider text-slate-500">
+              <div key={group.id} className={`relative min-w-0 ${DROPDOWN_GROUP_WIDTH[group.id]}`}>
+                <p className="mb-1.5 text-[10px] font-black uppercase tracking-wider text-slate-500">
                   {group.title}
                 </p>
                 <button
@@ -1970,7 +2038,7 @@ export const Report58: React.FC = () => {
                 {isOpen && (
                   <div
                     role="menu"
-                    className="absolute left-0 right-0 top-[calc(100%+6px)] z-50 max-h-[min(50vh,14rem)] overflow-y-auto rounded-xl border border-slate-200 bg-white p-1.5 shadow-xl"
+                    className="absolute left-0 z-50 top-[calc(100%+6px)] min-w-full max-h-[min(50vh,14rem)] overflow-y-auto rounded-xl border border-slate-200 bg-white p-1.5 shadow-xl sm:min-w-[max(100%,18rem)]"
                   >
                     {items.map((item) => {
                       const isActive = activeReport === item.id;
@@ -1979,7 +2047,7 @@ export const Report58: React.FC = () => {
                           key={item.id}
                           type="button"
                           role="menuitem"
-                          onClick={() => selectReport(item.id)}
+                          onClick={() => selectTt58Report(item.id)}
                           className={`flex w-full rounded-lg px-3 py-2 text-left text-xs font-bold leading-snug transition-colors ${
                             isActive
                               ? 'bg-blue-600 text-white shadow-sm'
@@ -1997,7 +2065,72 @@ export const Report58: React.FC = () => {
           })}
         </div>
 
-        <div className="mt-3 rounded-lg border border-slate-100 bg-slate-50/90 px-3 py-2">
+        <div className={`mt-5 relative min-w-0 ${MGMT_SELECT_WIDTH}`}>
+          <p className="mb-1.5 text-[10px] font-black uppercase tracking-wider text-slate-500">
+            Báo cáo quản trị
+          </p>
+          <button
+            type="button"
+            onClick={() => {
+              setMgmtDropdownOpen((open) => !open);
+              setOpenDropdown(null);
+            }}
+            className={reportTabBtnClass(mgmtDropdownOpen, mgmtMenuActive)}
+            aria-expanded={mgmtDropdownOpen}
+            aria-haspopup="menu"
+          >
+            <span className="flex min-w-0 flex-1 items-center gap-2 truncate leading-snug">
+              <Gauge className="h-4 w-4 shrink-0 text-blue-600" aria-hidden />
+              Quản trị
+            </span>
+            <ChevronDown
+              className={`h-4 w-4 shrink-0 text-slate-500 transition-transform ${mgmtDropdownOpen ? 'rotate-180' : ''}`}
+              aria-hidden
+            />
+          </button>
+          {mgmtDropdownOpen && (
+            <div
+              role="menu"
+              className="absolute left-0 z-50 top-[calc(100%+6px)] min-w-full max-h-[min(50vh,16rem)] overflow-y-auto rounded-xl border border-slate-200 bg-white p-1.5 shadow-xl sm:min-w-[max(100%,20rem)]"
+            >
+              <p className="px-2 pb-1.5 text-[10px] font-black uppercase tracking-wider text-slate-400">
+                Báo cáo quản trị
+              </p>
+              {MANAGEMENT_REPORT_ITEMS.map((item) => {
+                const isActive = activeReport === item.id;
+                const muted = !mgmtHasData[item.id];
+                const Icon = item.icon;
+                return (
+                  <button
+                    key={item.id}
+                    type="button"
+                    role="menuitem"
+                    title={muted ? 'Ít hoặc chưa có dữ liệu — vẫn có thể mở báo cáo' : undefined}
+                    onClick={() => selectReport(item.id)}
+                    className={`flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left text-xs font-bold leading-snug transition-colors ${
+                      muted ? 'opacity-55' : ''
+                    } ${
+                      isActive
+                        ? 'bg-blue-600 text-white shadow-sm'
+                        : 'text-slate-700 hover:bg-slate-100'
+                    }`}
+                  >
+                    <span
+                      className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-md ${
+                        isActive ? 'bg-white/20 text-white' : 'bg-slate-100 text-slate-500'
+                      }`}
+                    >
+                      <Icon className="h-3.5 w-3.5" />
+                    </span>
+                    <span className="min-w-0 flex-1">{item.label}</span>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </div>
+
+        <div className="mt-4 max-w-full rounded-lg border border-slate-100 bg-slate-50/90 px-3 py-2 sm:max-w-[42rem]">
           <p className="truncate text-xs font-semibold text-slate-700 sm:text-sm">
             <span className="text-slate-500">Đang xem: </span>
             {activeReportLabel}

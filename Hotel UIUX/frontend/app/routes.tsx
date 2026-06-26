@@ -9,6 +9,7 @@ import {
   CITPage,
   DashboardPage,
   DeviceList,
+  DeliveryPage,
   DocumentPage,
   FundPage,
   HotelPmsPage,
@@ -26,6 +27,15 @@ const HOTEL_PMS_TAB_MAP = {
   hotel_pms_housekeeping: 'housekeeping',
   hotel_pms_rates: 'rates',
   hotel_pms_services: 'services',
+} as const;
+
+const DELIVERY_TAB_MAP = {
+  delivery_dashboard: 'DASHBOARD',
+  delivery_distributors: 'DISTRIBUTORS',
+  delivery_products: 'PRODUCTS',
+  delivery_orders: 'ORDERS',
+  delivery_dispatch: 'DISPATCH',
+  delivery_fleet: 'FLEET',
 } as const;
 
 // Modals
@@ -60,6 +70,7 @@ export const AppRoutes = () => {
 
   const isDocumentRoute = activeTab.startsWith('doc_');
   const hotelPmsTab = HOTEL_PMS_TAB_MAP[activeTab as keyof typeof HOTEL_PMS_TAB_MAP];
+  const deliveryModuleTab = DELIVERY_TAB_MAP[activeTab as keyof typeof DELIVERY_TAB_MAP];
   const isSystemRoute = activeTab.startsWith('sys_');
   const accountingStandard = systemConfig.accountingRegime?.standard === 'TT58_2026' ? 'TT58_2026' : 'TT133';
   const ReportPage = REGULATION_REGISTRY[accountingStandard].ReportPage;
@@ -133,6 +144,14 @@ export const AppRoutes = () => {
 
       <TabKeepAlive active={isDocumentRoute}>
         <DocumentPage />
+      </TabKeepAlive>
+
+      <TabKeepAlive active={!!deliveryModuleTab}>
+        <DeliveryPage
+          initialModule={deliveryModuleTab ?? 'DASHBOARD'}
+          embedded
+          visible={!!deliveryModuleTab}
+        />
       </TabKeepAlive>
 
       <TabKeepAlive active={!!hotelPmsTab}>

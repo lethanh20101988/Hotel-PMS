@@ -284,39 +284,41 @@ function App({ initialTab = 'frontdesk', embedded = false, visible = true }: Hot
     const targetBookingId = resolveActiveBookingId();
     if (!targetBookingId) return;
 
-    setBookings((prevBookings) =>
-      prevBookings.map((b) =>
-        b.id === targetBookingId ? { ...b, services: [...b.services, serviceItem] } : b,
-      ),
-    );
+    const currentBooking = bookings.find((b) => b.id === targetBookingId);
+    if (!currentBooking) return;
+    const updatedBooking = { ...currentBooking, services: [...currentBooking.services, serviceItem] };
+    setSelectedBooking(updatedBooking);
+    const liveRoom = rooms.find((room) => room.id === updatedBooking.roomId);
+    if (liveRoom) setSelectedRoom(liveRoom);
+    setBookings((prevBookings) => prevBookings.map((b) => (b.id === targetBookingId ? updatedBooking : b)));
   };
 
   const updateServiceInBooking = (serviceIndex: number, serviceItem: BookingService) => {
     const targetBookingId = resolveActiveBookingId();
     if (!targetBookingId) return;
 
-    setBookings((prevBookings) =>
-      prevBookings.map((b) => {
-        if (b.id !== targetBookingId) return b;
-        const nextServices = [...b.services];
-        if (serviceIndex < 0 || serviceIndex >= nextServices.length) return b;
-        nextServices[serviceIndex] = serviceItem;
-        return { ...b, services: nextServices };
-      }),
-    );
+    const currentBooking = bookings.find((b) => b.id === targetBookingId);
+    if (!currentBooking) return;
+    const nextServices = [...currentBooking.services];
+    if (serviceIndex < 0 || serviceIndex >= nextServices.length) return;
+    nextServices[serviceIndex] = serviceItem;
+    const updatedBooking = { ...currentBooking, services: nextServices };
+    setSelectedBooking(updatedBooking);
+    setBookings((prevBookings) => prevBookings.map((b) => (b.id === targetBookingId ? updatedBooking : b)));
   };
 
   const removeServiceFromBooking = (serviceIndex: number) => {
     const targetBookingId = resolveActiveBookingId();
     if (!targetBookingId) return;
 
-    setBookings((prevBookings) =>
-      prevBookings.map((b) => {
-        if (b.id !== targetBookingId) return b;
-        const nextServices = b.services.filter((_, idx) => idx !== serviceIndex);
-        return { ...b, services: nextServices };
-      }),
-    );
+    const currentBooking = bookings.find((b) => b.id === targetBookingId);
+    if (!currentBooking) return;
+    const updatedBooking = {
+      ...currentBooking,
+      services: currentBooking.services.filter((_, idx) => idx !== serviceIndex),
+    };
+    setSelectedBooking(updatedBooking);
+    setBookings((prevBookings) => prevBookings.map((b) => (b.id === targetBookingId ? updatedBooking : b)));
   };
 
   const checkoutRoom = (

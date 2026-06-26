@@ -1,0 +1,8 @@
+{
+  "name": "Smart - Hệ thống Quản lý Phân phối 10.6.1",
+  "description": "Hệ thống quản lý nhà phân phối, đơn hàng và điều phối vận tải thông minh tích hợp Gemini AI.",
+  "requestFramePermissions": [
+    "camera"
+  ],
+  "majorCapabilities": []
+}

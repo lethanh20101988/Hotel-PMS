@@ -138,6 +138,7 @@ type RbacPermissionName =
   | "access_dashboard"
   | "access_system"
   | "access_hotel_pms"
+  | "access_delivery"
   | "access_devices"
   | "access_inventory"
   | "access_invoices"
@@ -176,6 +177,7 @@ const RBAC_PERMISSIONS: RbacPermissionName[] = [
   "access_dashboard",
   "access_system",
   "access_hotel_pms",
+  "access_delivery",
   "access_devices",
   "access_inventory",
   "access_invoices",
@@ -1300,11 +1302,17 @@ function resolveNotifyCompanyId(req?: any): string {
   return u?.companyId || DEFAULT_COMPANY_ID;
 }
 
-function notifyScopeChanged(req: any, kinds: StateChangeKind[]) {
+function notifyScopeChanged(
+  req: any,
+  kinds: StateChangeKind[],
+  opts?: { dataVersion?: number; state?: unknown },
+) {
   notifyStateChanged({
     sourceClientId: readClientId(req),
     kinds,
     companyId: resolveNotifyCompanyId(req),
+    dataVersion: opts?.dataVersion,
+    state: opts?.state,
   });
 }
 
@@ -2868,11 +2876,12 @@ app.put("/api/state", requireAuth, async (req, res) => {
       console.log(`[outbox] enqueued ${outboxEnqueued} booking event(s) from PUT /api/state`);
       if (inlineOutboxWorker) void inlineOutboxWorker.tick();
     }
-    bumpStateDataVersion();
-    notifyScopeChanged(req, ["state"]);
+    const dataVersion = bumpStateDataVersion();
+    const hydratedState = await buildHydratedStateWithOpeningSql(prisma, strippedState);
+    notifyScopeChanged(req, ["state"], { dataVersion, state: hydratedState });
     setStateRevisionHeader(res);
     setStateDataVersionHeader(res);
-    res.json(await buildHydratedStateWithOpeningSql(prisma, strippedState));
+    res.json(hydratedState);
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Failed to save state" });

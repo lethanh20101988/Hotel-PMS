@@ -26,14 +26,79 @@ import { Pagination } from '@shared/components/Pagination';
 type SubTab = 'trash' | 'archive' | 'pending';
 type LifecyclePageSize = 10 | 20 | 30 | 50 | 100;
 const LIFECYCLE_PAGE_SIZES: LifecyclePageSize[] = [10, 20, 30, 50, 100];
+type LifecycleRemoteEntity = {
+  action?: string;
+  entityType?: string;
+  entityId?: string;
+};
 
 /** Tự refetch khi có thay đổi realtime — không bật trạng thái "Đang tải" (tránh nháy UI). */
-function useAutoRefresh(reload: (opts?: { silent?: boolean }) => void) {
+function useAutoRefresh(
+  sub: SubTab,
+  reload: (opts?: { silent?: boolean }) => void,
+  setRows: React.Dispatch<React.SetStateAction<LifecycleRow[]>>,
+  setSelectedKeys: React.Dispatch<React.SetStateAction<Set<string>>>,
+) {
   useEffect(() => {
-    const handler = () => reload({ silent: true });
+    const handler = (ev: Event) => {
+      const entity = (ev as CustomEvent<{ entity?: LifecycleRemoteEntity }>).detail?.entity;
+      const action = entity?.action;
+      const entityType = entity?.entityType;
+      const entityId = entity?.entityId;
+      if (!action || !entityType || !entityId) {
+        reload({ silent: true });
+        return;
+      }
+
+      const key = `${entityType}:${entityId}`;
+      let handled = false;
+      setRows((prev) => {
+        const remove = () => {
+          const next = prev.filter((r) => rowKeyOf(r) !== key);
+          handled = next.length !== prev.length;
+          return next;
+        };
+        if (sub === 'trash') {
+          if (['DATA_RESTORED', 'DATA_ARCHIVED', 'DATA_DELETE_REQUESTED', 'DATA_DELETED', 'DATA_PURGED'].includes(action)) {
+            return remove();
+          }
+          return prev;
+        }
+        if (sub === 'pending') {
+          if (['DATA_RESTORED', 'DATA_DELETED', 'DATA_PURGED'].includes(action)) {
+            return remove();
+          }
+          if (action === 'DATA_DELETE_APPROVED') {
+            let changed = false;
+            const next = prev.map((r) => {
+              if (rowKeyOf(r) !== key) return r;
+              changed = true;
+              return { ...r, approved: 1, approved_at: r.approved_at || new Date().toISOString() };
+            });
+            handled = changed;
+            return next;
+          }
+          // Mục mới chuyển từ Thùng rác sang Chờ xóa cần row đầy đủ, fallback reload nền.
+          if (action === 'DATA_DELETE_REQUESTED') return prev;
+        }
+        if (sub === 'archive' && ['DATA_RESTORED', 'DATA_DELETED', 'DATA_PURGED'].includes(action)) {
+          return remove();
+        }
+        return prev;
+      });
+      setSelectedKeys((prev) => {
+        if (!prev.has(key)) return prev;
+        const next = new Set(prev);
+        next.delete(key);
+        return next;
+      });
+      if (!handled && sub === 'pending' && action === 'DATA_DELETE_REQUESTED') {
+        reload({ silent: true });
+      }
+    };
     window.addEventListener('vtr:state-remote-update', handler as EventListener);
     return () => window.removeEventListener('vtr:state-remote-update', handler as EventListener);
-  }, [reload]);
+  }, [reload, setRows, setSelectedKeys, sub]);
 }
 
 const fmt = (s: string | null | undefined) => (s ? new Date(s).toLocaleString('vi-VN') : '—');
@@ -102,7 +167,7 @@ const VersionHistoryModal: React.FC<{ row: LifecycleRow; onClose: () => void }> 
 
 const rowKeyOf = (r: LifecycleRow) => `${r.entity_type}:${r.entity_id}`;
 
-// ---------- Modal: xác nhận XÓA VĨNH VIỄN (double confirm + countdown) ----------
+// ---------- Modal: xác nhận XÓA VĨNH VIỄN ----------
 const HardDeleteModal: React.FC<{
   rows: LifecycleRow[];
   onClose: () => void;
@@ -113,15 +178,8 @@ const HardDeleteModal: React.FC<{
   const row = rows[0];
   const bulk = rows.length > 1;
   const [text, setText] = useState('');
-  const [countdown, setCountdown] = useState(5);
 
-  useEffect(() => {
-    if (countdown <= 0) return;
-    const t = window.setTimeout(() => setCountdown((c) => c - 1), 1000);
-    return () => window.clearTimeout(t);
-  }, [countdown]);
-
-  const ready = text.trim() === HARD_DELETE_CONFIRM_TEXT && countdown <= 0;
+  const ready = text.trim() === HARD_DELETE_CONFIRM_TEXT;
 
   const confirm = () => {
     if (!ready) return;
@@ -194,7 +252,7 @@ const HardDeleteModal: React.FC<{
             className="inline-flex items-center gap-1.5 rounded-xl bg-rose-600 px-4 py-2 text-sm font-black text-white hover:bg-rose-700 disabled:cursor-not-allowed disabled:opacity-40"
           >
             <ShieldX size={15} />
-            {countdown > 0 ? `Xóa vĩnh viễn (${countdown}s)` : 'Xóa vĩnh viễn'}
+            Xóa vĩnh viễn
           </button>
         </div>
       </div>
@@ -211,6 +269,7 @@ const SUB_TABS: { id: SubTab; label: string; icon: React.ComponentType<any> }[] 
 export const LifecyclePage: React.FC = () => {
   const { pushToast } = useAppToast();
   const [me, setMe] = useState<MeProfile | null>(null);
+  const [meLoaded, setMeLoaded] = useState(false);
   const [sub, setSub] = useState<SubTab>('trash');
   const [rows, setRows] = useState<LifecycleRow[]>([]);
   const [loading, setLoading] = useState(false);
@@ -223,14 +282,28 @@ export const LifecyclePage: React.FC = () => {
   const [pageSize, setPageSize] = useState<LifecyclePageSize>(20);
 
   useEffect(() => {
-    lifecycleApi.me().then(setMe).catch(() => setMe(null));
+    let cancelled = false;
+    lifecycleApi
+      .me()
+      .then((profile) => {
+        if (!cancelled) setMe(profile);
+      })
+      .catch(() => {
+        if (!cancelled) setMe(null);
+      })
+      .finally(() => {
+        if (!cancelled) setMeLoaded(true);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const can = useCallback(
     (perm: string) => !!me && (me.role === 'super_admin' || me.permissions?.includes(perm)),
     [me],
   );
-  const canViewPending = can('delete:approve') || can('delete:request') || can('delete:hard');
+  const canViewPending = !meLoaded || can('delete:approve') || can('delete:request') || can('delete:hard');
 
   const visibleTabs = useMemo(
     () => SUB_TABS.filter((t) => (t.id === 'pending' ? canViewPending : true)),
@@ -238,7 +311,8 @@ export const LifecyclePage: React.FC = () => {
   );
 
   const reload = useCallback((opts?: { silent?: boolean }) => {
-    if (!opts?.silent) setLoading(true);
+    const showLoading = opts?.silent === false;
+    if (showLoading) setLoading(true);
     setError('');
     const p =
       sub === 'trash'
@@ -248,8 +322,32 @@ export const LifecyclePage: React.FC = () => {
           : lifecycleApi.listPendingDelete();
     p.then(setRows)
       .catch((e) => setError(String(e.message || e)))
-      .finally(() => setLoading(false));
+      .finally(() => {
+        if (showLoading) setLoading(false);
+      });
   }, [sub]);
+
+  const removeRowsOptimistic = useCallback((targets: LifecycleRow[]) => {
+    const keys = new Set(targets.map(rowKeyOf));
+    if (keys.size === 0) return;
+    setRows((prev) => prev.filter((row) => !keys.has(rowKeyOf(row))));
+    setSelectedKeys((prev) => {
+      const next = new Set(prev);
+      for (const key of keys) next.delete(key);
+      return next;
+    });
+  }, []);
+
+  const approveRowsOptimistic = useCallback((targets: LifecycleRow[]) => {
+    const keys = new Set(targets.map(rowKeyOf));
+    if (keys.size === 0) return;
+    const approvedAt = new Date().toISOString();
+    setRows((prev) =>
+      prev.map((row) =>
+        keys.has(rowKeyOf(row)) ? { ...row, approved: 1, approved_at: row.approved_at || approvedAt } : row,
+      ),
+    );
+  }, []);
 
   useEffect(() => {
     if (sub === 'pending' && !canViewPending) {
@@ -258,9 +356,9 @@ export const LifecyclePage: React.FC = () => {
     }
     setSelectedKeys(new Set());
     setPage(1);
-    reload();
+    reload({ silent: true });
   }, [reload, sub, canViewPending]);
-  useAutoRefresh(reload);
+  useAutoRefresh(sub, reload, setRows, setSelectedKeys);
 
   const totalPages = Math.max(1, Math.ceil(rows.length / pageSize));
   const safePage = Math.min(Math.max(1, page), totalPages);
@@ -309,10 +407,12 @@ export const LifecyclePage: React.FC = () => {
     fn: (row: LifecycleRow) => Promise<unknown>,
     confirmMsg?: string,
     successMsg?: string,
+    optimistic?: () => void,
   ) => {
     if (targets.length === 0) return;
     if (confirmMsg && !window.confirm(confirmMsg)) return;
     setBusyKey('bulk');
+    optimistic?.();
     let ok = 0;
     let fail = 0;
     let lastErr = '';
@@ -327,7 +427,7 @@ export const LifecyclePage: React.FC = () => {
         }
       }
       setSelectedKeys(new Set());
-      reload();
+      reload({ silent: true });
       if (fail === 0) {
         pushToast({
           message: successMsg || `Đã xử lý ${ok} mục.`,
@@ -345,12 +445,19 @@ export const LifecyclePage: React.FC = () => {
     }
   };
 
-  const run = async (key: string, fn: () => Promise<unknown>, confirmMsg?: string, successMsg?: string) => {
+  const run = async (
+    key: string,
+    fn: () => Promise<unknown>,
+    confirmMsg?: string,
+    successMsg?: string,
+    optimistic?: () => void,
+  ) => {
     if (confirmMsg && !window.confirm(confirmMsg)) return;
     setBusyKey(key);
+    optimistic?.();
     try {
       await fn();
-      reload();
+      reload({ silent: true });
       if (successMsg) pushToast({ message: successMsg, variant: 'success' });
     } catch (e: any) {
       pushToast({ message: `Thao tác thất bại: ${e?.message || e}`, variant: 'error', durationMs: 8000 });
@@ -392,7 +499,7 @@ export const LifecyclePage: React.FC = () => {
         ))}
         <button
           type="button"
-          onClick={reload}
+          onClick={() => reload({ silent: true })}
           className="ml-auto inline-flex items-center gap-1.5 rounded-xl border border-slate-200 px-3 py-2 text-sm font-bold text-slate-500 hover:bg-slate-50"
         >
           <RotateCcw size={15} /> Tải lại
@@ -420,6 +527,7 @@ export const LifecyclePage: React.FC = () => {
                   (r) => lifecycleApi.restore(r.entity_type, r.entity_id),
                   `Khôi phục ${selectedRows.length} mục về trạng thái hoạt động?`,
                   `Đã khôi phục ${selectedRows.length} mục.`,
+                  () => removeRowsOptimistic(selectedRows),
                 )
               }
               className="inline-flex items-center gap-1 rounded-lg border border-emerald-300 bg-white px-3 py-1.5 text-xs font-bold text-emerald-700 hover:bg-emerald-50 disabled:opacity-40"
@@ -437,6 +545,7 @@ export const LifecyclePage: React.FC = () => {
                   (r) => lifecycleApi.requestDelete(r.entity_type, r.entity_id),
                   `Gửi yêu cầu xóa vĩnh viễn cho ${selectedRows.length} mục? Yêu cầu cần super admin duyệt trước khi xóa thật.`,
                   `Đã gửi yêu cầu xóa vĩnh viễn cho ${selectedRows.length} mục.`,
+                  () => removeRowsOptimistic(selectedRows),
                 )
               }
               className="inline-flex items-center gap-1 rounded-lg border border-rose-300 bg-white px-3 py-1.5 text-xs font-bold text-rose-700 hover:bg-rose-50 disabled:opacity-40"
@@ -457,6 +566,7 @@ export const LifecyclePage: React.FC = () => {
                     ? `Duyệt yêu cầu xóa vĩnh viễn cho ${targets.length} mục?`
                     : undefined,
                   targets.length > 0 ? `Đã duyệt ${targets.length} yêu cầu xóa.` : undefined,
+                  () => approveRowsOptimistic(targets),
                 );
                 if (targets.length === 0) {
                   pushToast({ message: 'Không có mục «Chờ duyệt» trong danh sách đã chọn.', variant: 'error' });
@@ -513,7 +623,7 @@ export const LifecyclePage: React.FC = () => {
                         if (el) el.indeterminate = somePageSelected && !allPageSelected;
                       }}
                       onChange={toggleAllVisible}
-                      disabled={loading || paginatedRows.length === 0 || busyKey === 'bulk'}
+                      disabled={paginatedRows.length === 0 || busyKey === 'bulk'}
                       className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
                     />
                   </th>
@@ -528,17 +638,7 @@ export const LifecyclePage: React.FC = () => {
             </tr>
           </thead>
             <tbody>
-              {loading && (
-                <tr>
-                  <td
-                    colSpan={sub === 'trash' || sub === 'pending' ? 6 : 5}
-                    className="px-4 py-12 text-center text-sm font-medium text-slate-400"
-                  >
-                    Đang tải…
-                  </td>
-                </tr>
-              )}
-              {!loading && paginatedRows.length === 0 && (
+              {paginatedRows.length === 0 && (
                 <tr>
                   <td
                     colSpan={sub === 'trash' || sub === 'pending' ? 6 : 5}
@@ -548,8 +648,7 @@ export const LifecyclePage: React.FC = () => {
                   </td>
                 </tr>
               )}
-              {!loading &&
-                paginatedRows.map((r) => {
+              {paginatedRows.map((r) => {
                 const key = rowKeyOf(r);
                 const busy = busyKey === key || busyKey === 'bulk';
                 const approved = !!r.approved;
@@ -602,7 +701,15 @@ export const LifecyclePage: React.FC = () => {
                           <button
                             type="button"
                             disabled={busy}
-                            onClick={() => run(key, () => lifecycleApi.restore(r.entity_type, r.entity_id), undefined, 'Đã khôi phục bản ghi về trạng thái hoạt động.')}
+                            onClick={() =>
+                              run(
+                                key,
+                                () => lifecycleApi.restore(r.entity_type, r.entity_id),
+                                undefined,
+                                'Đã khôi phục bản ghi về trạng thái hoạt động.',
+                                () => removeRowsOptimistic([r]),
+                              )
+                            }
                             className="inline-flex items-center gap-1 rounded-lg border border-emerald-200 px-2 py-1 text-xs font-bold text-emerald-700 hover:bg-emerald-50 disabled:opacity-40"
                             title="Khôi phục về ACTIVE"
                           >
@@ -615,7 +722,15 @@ export const LifecyclePage: React.FC = () => {
                           <button
                             type="button"
                             disabled={busy}
-                            onClick={() => run(key, () => lifecycleApi.archive(r.entity_type, r.entity_id))}
+                            onClick={() =>
+                              run(
+                                key,
+                                () => lifecycleApi.archive(r.entity_type, r.entity_id),
+                                undefined,
+                                undefined,
+                                () => removeRowsOptimistic([r]),
+                              )
+                            }
                             className="inline-flex items-center gap-1 rounded-lg border border-amber-200 px-2 py-1 text-xs font-bold text-amber-700 hover:bg-amber-50 disabled:opacity-40"
                             title="Chuyển sang lưu trữ"
                           >
@@ -632,6 +747,7 @@ export const LifecyclePage: React.FC = () => {
                                 () => lifecycleApi.requestDelete(r.entity_type, r.entity_id),
                                 'Gửi yêu cầu xóa vĩnh viễn? Yêu cầu cần super admin duyệt trước khi xóa thật.',
                                 'Đã gửi yêu cầu xóa vĩnh viễn. Chuyển sang tab Chờ xóa vĩnh viễn.',
+                                () => removeRowsOptimistic([r]),
                               )
                             }
                             className="inline-flex items-center gap-1 rounded-lg border border-rose-200 px-2 py-1 text-xs font-bold text-rose-600 hover:bg-rose-50 disabled:opacity-40"
@@ -652,6 +768,7 @@ export const LifecyclePage: React.FC = () => {
                                 () => lifecycleApi.approveDelete(r.entity_type, r.entity_id),
                                 'Duyệt yêu cầu xóa vĩnh viễn?',
                                 'Đã duyệt yêu cầu xóa. Bạn có thể xóa vĩnh viễn sau khi bấm nút Xóa vĩnh viễn.',
+                                () => approveRowsOptimistic([r]),
                               )
                             }
                             className="inline-flex items-center gap-1 rounded-lg border border-blue-200 px-2 py-1 text-xs font-bold text-blue-700 hover:bg-blue-50 disabled:opacity-40"
@@ -708,12 +825,15 @@ export const LifecyclePage: React.FC = () => {
         <HardDeleteModal
           rows={hardRows}
           onClose={() => setHardRows(null)}
-          onStartDelete={() => setBusyKey('bulk')}
+          onStartDelete={() => {
+            setBusyKey('bulk');
+            removeRowsOptimistic(hardRows);
+          }}
           onSuccess={(n) => {
             setBusyKey('');
             setHardRows(null);
             setSelectedKeys(new Set());
-            reload();
+            reload({ silent: true });
             pushToast({
               message:
                 n > 1
@@ -724,7 +844,7 @@ export const LifecyclePage: React.FC = () => {
           }}
           onError={(message) => {
             setBusyKey('');
-            reload();
+            reload({ silent: true });
             pushToast({
               message: `Xóa vĩnh viễn thất bại: ${message}`,
               variant: 'error',

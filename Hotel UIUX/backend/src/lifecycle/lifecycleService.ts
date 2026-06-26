@@ -55,7 +55,7 @@ export const DELETE_PERMISSIONS = {
 } as const;
 
 const HARD_DELETE_CONFIRM_TEXT = "DELETE";
-const HARD_DELETE_DELAY_MS = Number(process.env.LC_HARD_DELETE_DELAY_MS || 5000);
+const HARD_DELETE_DELAY_MS = Number(process.env.LC_HARD_DELETE_DELAY_MS || 0);
 /** Field thường gặp để xác định "chủ sở hữu" record (staff chỉ xóa dữ liệu của mình). */
 const OWNER_FIELDS = ["createdBy", "created_by", "ownerId", "owner_id", "userId", "user_id"];
 

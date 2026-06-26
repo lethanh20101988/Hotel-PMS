@@ -22,9 +22,11 @@ export type RealtimeEnvelope<TPayload = unknown> = {
 
 export type StateChangedPayload = {
   revision: number;
+  dataVersion?: number;
   sourceClientId?: string;
   kinds: StateChangeKind[];
   entity?: EntityLifecycleMeta;
+  state?: unknown;
 };
 
 export type OrderCreatedPayload = {

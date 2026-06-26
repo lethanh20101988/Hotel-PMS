@@ -95,6 +95,7 @@ function buildOrderEvent(
     status,
   };
   if (changedFields.length > 0) businessPayload.changedFields = changedFields;
+  if (sourceClientId?.trim()) businessPayload.sourceClientId = sourceClientId.trim();
 
   return {
     type,

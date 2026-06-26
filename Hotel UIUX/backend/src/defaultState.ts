@@ -231,6 +231,8 @@ export function buildDefaultState(): PersistedState {
     catalogBackupSnapshot: null,
     /** Hotel PMS — phòng, booking, kho PMS, chi phí (đồng bộ đa máy qua AppState). */
     hotelPms: null,
+    /** Giao hàng (LogiSmart) — NPP, đơn, đội xe, chuyến, lương… (đồng bộ đa máy qua AppState). */
+    delivery: null,
   } as PersistedState;
 }
 

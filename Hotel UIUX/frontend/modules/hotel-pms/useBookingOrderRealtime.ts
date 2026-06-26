@@ -4,6 +4,7 @@ import {
   leaveRealtimeRooms,
   orderRoomForBooking,
 } from '../../services/realtimeClient';
+import { getTabClientId } from '../../services/tabClientId';
 
 /**
  * Join room order:{bookingId} khi xem chi tiết booking;
@@ -27,10 +28,11 @@ export function useBookingOrderRealtime(
       const detail = (ev as CustomEvent<{
         eventId?: string;
         event?: string;
-        payload?: { orderId?: string };
+        payload?: { orderId?: string; sourceClientId?: string };
       }>).detail;
       // Duplicate eventId đã filter tại realtimeClient (idempotency)
       if (detail?.event !== 'order_updated') return;
+      if (detail.payload?.sourceClientId && detail.payload.sourceClientId === getTabClientId()) return;
       const remoteId = String(detail.payload?.orderId || '').trim();
       if (remoteId && remoteId !== id) return;
       onUpdatedRef.current?.(id);

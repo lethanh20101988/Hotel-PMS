@@ -49,6 +49,7 @@ const PERMISSION_LABELS: Record<string, string> = {
   access_dashboard: 'Truy cập Tổng quan',
   access_system: 'Truy cập Hệ thống',
   access_hotel_pms: 'Truy cập Hotel PMS',
+  access_delivery: 'Truy cập Giao hàng',
   access_devices: 'Truy cập Thiết bị & Gia hạn',
   access_inventory: 'Truy cập Sản phẩm & Bản quyền',
   access_invoices: 'Truy cập Hóa đơn & VAT',

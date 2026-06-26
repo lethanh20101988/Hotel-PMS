@@ -645,11 +645,10 @@ export const InvoicePage: React.FC<InvoicePageProps> = ({ invoices, onCreate, on
     }
   };
 
-  const handleConfirmDelete = async (invoice: Invoice) => {
-     const success = await onDelete(invoice);
-     if (success) {
-       setDeleteInvoice(null);
-     }
+  const handleConfirmDelete = (invoice: Invoice) => {
+    // Đóng modal ngay — store đã cập nhật danh sách đồng bộ trước khi gọi lifecycle API.
+    setDeleteInvoice(null);
+    void onDelete(invoice);
   };
 
   const getVatRateLabel = (inv: Invoice) => {

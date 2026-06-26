@@ -98,6 +98,11 @@ import {
   normalizeHotelPmsState,
   type HotelPmsPersistedState,
 } from '../modules/hotel-pms/hotelPmsStorage';
+import {
+  getDefaultDeliveryState,
+  normalizeDeliveryState,
+  type DeliveryPersistedState,
+} from '../modules/delivery/deliveryStorage';
 import { applyInventoryExcelImportBatch } from '../modules/catalogs/utils/catalogExcelIO';
 import { findStrictDuplicateInvoice } from '@shared/utils/invoiceDuplicateIdentity';
 import {
@@ -579,6 +584,113 @@ function normalizeInventoryRows(items: InventoryItem[], defaultWarehouseId: stri
   return (items || []).map((item) => ensureWarehouseBalances(item, defaultWarehouseId));
 }
 
+function reconcileMissingInventoryFromTransactions(
+  inventoryRows: InventoryItem[],
+  catalogRows: InventoryItem[],
+  transactionsRows: InventoryTransaction[],
+  defaultWarehouseId: string,
+): { inventory: InventoryItem[]; revivedIds: string[] } {
+  const txRows = (transactionsRows || [])
+    .filter((trx) => trx?.itemId && Number(trx.quantity || 0) > 0)
+    .slice()
+    .sort((a, b) => {
+      const byDate = String(a.date || '').localeCompare(String(b.date || ''));
+      return byDate !== 0 ? byDate : String(a.id || '').localeCompare(String(b.id || ''));
+    });
+  if (txRows.length === 0) return { inventory: inventoryRows || [], revivedIds: [] };
+
+  const parseSerials = (text?: string) =>
+    String(text || '')
+      .split(/[\n,;]+/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+  const currentById = new Map((inventoryRows || []).map((row) => [String(row.id), ensureWarehouseBalances(row, defaultWarehouseId)]));
+  const catalogById = new Map((catalogRows || []).map((row) => [String(row.id), ensureWarehouseBalances(row, defaultWarehouseId)]));
+  const computedById = new Map<string, InventoryItem>();
+
+  for (const trx of txRows) {
+    const itemId = String(trx.itemId || '').trim();
+    if (!itemId) continue;
+    const warehouseId = String(trx.warehouseId || defaultWarehouseId).trim() || defaultWarehouseId;
+    const base =
+      computedById.get(itemId) ||
+      (() => {
+        const catalog = catalogById.get(itemId);
+        const current = currentById.get(itemId);
+        const seed = catalog || current || ({
+          id: itemId,
+          name: trx.itemName || itemId,
+          sku: '',
+          category: '',
+          unit: '',
+          quantity: 0,
+          minStock: 0,
+          costPrice: Number(trx.price || 0),
+          sellingPrice: 0,
+          accountCode: '156',
+          costAccount: '632',
+        } as InventoryItem);
+        return ensureWarehouseBalances(
+          { ...seed, quantity: 0, serials: [], serialDetails: [], warehouseBalances: [] },
+          defaultWarehouseId,
+        );
+      })();
+    const serials = parseSerials(trx.serials);
+    const serialDetails: SerialInfo[] = trx.type === 'IMPORT' ? (trx.serialInfoSnapshot || []) : [];
+    computedById.set(
+      itemId,
+      applyWarehouseBalanceChange(
+        base,
+        trx.type === 'IMPORT'
+          ? {
+              warehouseId,
+              qtyDelta: Number(trx.quantity || 0),
+              addSerials: serials,
+              addSerialDetails: serialDetails,
+              updatedAt: trx.date,
+              costPrice: Number(trx.price || base.costPrice || 0),
+            }
+          : {
+              warehouseId,
+              qtyDelta: -Number(trx.quantity || 0),
+              removeSerials: serials,
+              removeSerialDetailsBySerial: serials,
+              updatedAt: trx.date,
+            },
+        defaultWarehouseId,
+      ),
+    );
+  }
+
+  const revivedIds: string[] = [];
+  const nextById = new Map(currentById);
+  for (const [itemId, computedRaw] of computedById) {
+    const computed = rebuildItemTotalsFromWarehouseBalances({
+      ...computedRaw,
+      warehouseBalances: (computedRaw.warehouseBalances || [])
+        .map((balance) => ({ ...balance, quantity: Math.max(0, Number(balance.quantity || 0)) }))
+        .filter((balance) => Number(balance.quantity || 0) > 0 || (balance.serials || []).length > 0),
+    });
+    if (Number(computed.quantity || 0) <= 0 && (computed.serials || []).length === 0) continue;
+    const current = nextById.get(itemId);
+    if (!current || (Number(current.quantity || 0) <= 0 && (current.serials || []).length === 0)) {
+      nextById.set(itemId, computed);
+      revivedIds.push(itemId);
+    }
+  }
+
+  if (revivedIds.length === 0) return { inventory: inventoryRows || [], revivedIds };
+  const orderedIds = new Set((inventoryRows || []).map((row) => String(row.id)));
+  const inventory = (inventoryRows || []).map((row) => nextById.get(String(row.id)) || row);
+  for (const id of revivedIds) {
+    if (!orderedIds.has(id)) {
+      const row = nextById.get(id);
+      if (row) inventory.push(row);
+    }
+  }
+  return { inventory, revivedIds };
+}
+
 function remapInventoryRowsWarehouseId(
   items: InventoryItem[],
   fromId: string,
@@ -1022,11 +1134,11 @@ function mergeEntityDeletionAuditLogs(
   return [...byKey.values()].slice(-500);
 }
 
-/** Debounce ghi PostgreSQL trước khi broadcast WebSocket event. */
-const STATE_PERSIST_DEBOUNCE_MS = 50;
+/** Debounce rất ngắn để máy khác nhận realtime dưới 0.5s nhưng vẫn gom các setState cùng tick. */
+const STATE_PERSIST_DEBOUNCE_MS = 25;
 /** Chờ ngắn sau WebSocket event rồi tải lại (tránh đè persist đang chạy). */
 const REMOTE_STATE_RELOAD_DEBOUNCE_MS = 0;
-const REMOTE_STATE_RELOAD_WAIT_PERSIST_MS = 50;
+const REMOTE_STATE_RELOAD_WAIT_PERSIST_MS = 25;
 
 type YearKey = string;
 
@@ -1929,6 +2041,20 @@ const rebalanceInvoiceJournalDetails = (details: any[]) => {
   return next;
 };
 
+const describeInvoiceLineForLedger = (detail: InvoiceDetail) => {
+  const name = String(detail.productName || detail.note || '').trim();
+  const qty = toMoneyNumber(detail.quantity);
+  const unit = String(detail.unit || '').trim();
+  const vatRate = toMoneyNumber(detail.vatRate);
+  const parts = [
+    name,
+    qty > 0 ? `SL ${qty}${unit ? ` ${unit}` : ''}` : '',
+    toMoneyNumber(detail.price) > 0 ? `ĐG ${formatCurrency(toMoneyNumber(detail.price))}` : '',
+    vatRate > 0 ? `VAT ${vatRate}%` : '',
+  ].filter(Boolean);
+  return parts.join(' · ');
+};
+
 const buildInvoicePostingDetails = (invoice: Invoice): any[] => {
   const jeDetails: any[] = [];
   const isPurchase = invoice.type === 'PURCHASE';
@@ -1952,13 +2078,19 @@ const buildInvoicePostingDetails = (invoice: Invoice): any[] => {
           account: netAcc(detail.account || defaultPurchaseAcc),
           debit: allocated[i] ?? 0,
           credit: 0,
+          description: describeInvoiceLineForLedger(detail),
         });
       });
     } else if (toMoneyNumber(invoice.amount) > 0) {
       jeDetails.push({ account: netAcc(defaultPurchaseAcc), debit: toMoneyNumber(invoice.amount), credit: 0 });
     }
     if (toMoneyNumber(invoice.vatAmount) > 0) {
-      jeDetails.push({ account: '1331', debit: toMoneyNumber(invoice.vatAmount), credit: 0 });
+      jeDetails.push({
+        account: '1331',
+        debit: toMoneyNumber(invoice.vatAmount),
+        credit: 0,
+        description: `Thuế GTGT đầu vào HĐ ${invoice.invoiceNumber || invoice.id}`,
+      });
     }
     jeDetails.push({
       account: '331',
@@ -1969,6 +2101,7 @@ const buildInvoicePostingDetails = (invoice: Invoice): any[] => {
       objectName: invoice.customerName,
       sourceInvoiceId: invoice.id,
       sourceInvoiceNumber: invoice.invoiceNumber,
+      description: invoice.description || `Phải trả hóa đơn ${invoice.invoiceNumber || invoice.id}`,
     });
   } else if (isSales) {
     const salesDebitAccount = isDirectPaidDeferredInvoice
@@ -1983,6 +2116,7 @@ const buildInvoicePostingDetails = (invoice: Invoice): any[] => {
       objectName: invoice.customerName,
       sourceInvoiceId: invoice.id,
       sourceInvoiceNumber: invoice.invoiceNumber,
+      description: invoice.description || `Phải thu hóa đơn ${invoice.invoiceNumber || invoice.id}`,
     });
     const deferredRevenueEnabled = isDeferredRevenueInvoice(invoice);
     const invoiceDetails = Array.isArray(invoice.details) ? invoice.details : [];
@@ -1996,6 +2130,7 @@ const buildInvoicePostingDetails = (invoice: Invoice): any[] => {
         objectName: invoice.customerName,
         sourceInvoiceId: invoice.id,
         sourceInvoiceNumber: invoice.invoiceNumber,
+        description: invoice.description || `Doanh thu chưa thực hiện HĐ ${invoice.invoiceNumber || invoice.id}`,
       });
     } else if (invoiceDetails.length > 0) {
       const weights = invoiceDetails.map((detail: InvoiceDetail) => toMoneyNumber(detail.amount));
@@ -2011,6 +2146,7 @@ const buildInvoicePostingDetails = (invoice: Invoice): any[] => {
           objectName: invoice.customerName,
           sourceInvoiceId: invoice.id,
           sourceInvoiceNumber: invoice.invoiceNumber,
+          description: describeInvoiceLineForLedger(detail),
         });
       });
     } else if (toMoneyNumber(invoice.amount) > 0) {
@@ -2035,6 +2171,7 @@ const buildInvoicePostingDetails = (invoice: Invoice): any[] => {
         objectName: invoice.customerName,
         sourceInvoiceId: invoice.id,
         sourceInvoiceNumber: invoice.invoiceNumber,
+        description: `Thuế GTGT đầu ra HĐ ${invoice.invoiceNumber || invoice.id}`,
       });
     }
   }
@@ -3010,7 +3147,7 @@ interface AppContextType {
   handleUpdateCITMeta: (id: string, isDeductible: boolean, reason?: string) => void;
   handleUpdateLossRecord: (record: CITLossRecord) => void;
   handleUpdateCITLossRecord: (record: CITLossRecord) => void;
-  handleSaveVoucher: (voucher: AccountingVoucher, opts?: { skipEditableDateCheck?: boolean; skipJournalEntry?: boolean }) => { ok: boolean; finalVoucher?: AccountingVoucher };
+  handleSaveVoucher: (voucher: AccountingVoucher, opts?: { skipEditableDateCheck?: boolean; skipJournalEntry?: boolean; skipCashCheck?: boolean }) => { ok: boolean; finalVoucher?: AccountingVoucher };
   handleDeleteVoucher: (id: string) => void;
   handlePostVoucher: (id: string) => void;
   handleUnpostVoucher: (id: string) => void;
@@ -3097,6 +3234,9 @@ interface AppContextType {
   setHotelPmsState: (state: HotelPmsPersistedState) => void;
   /** Tải lại chỉ hotelPms từ GET /api/state — không reload opening/debt/kế toán. */
   refreshHotelPmsFromBackend: () => Promise<void>;
+  /** Dữ liệu Giao hàng (LogiSmart) — persist SQLite qua PUT /api/state (đồng bộ đa máy). */
+  deliveryState: DeliveryPersistedState;
+  setDeliveryState: (state: DeliveryPersistedState) => void;
 }
 
 const AppContext = createContext<AppContextType | undefined>(undefined);
@@ -3106,6 +3246,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [catalogSection, setCatalogSection] = useState('ACCOUNTS');
   const [hotelPmsResetNonce, setHotelPmsResetNonce] = useState(0);
   const [hotelPmsState, setHotelPmsState] = useState<HotelPmsPersistedState>(() => getDefaultHotelPmsState());
+  const [deliveryState, setDeliveryState] = useState<DeliveryPersistedState>(() => getDefaultDeliveryState());
   const [financialYear, setFinancialYear] = useState<FinancialYear>(() => {
     const currentYear = new Date().getFullYear();
     return { startDate: `${currentYear}-01-01`, endDate: `${currentYear}-12-31` };
@@ -3229,6 +3370,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const transactionsRef = useRef<InventoryTransaction[]>([]);
   const invoicesRef = useRef<Invoice[]>([]);
   const journalEntriesRef = useRef<JournalEntry[]>([]);
+  const fundTransactionsRef = useRef<FundTransaction[]>([]);
+  const accountingVouchersRef = useRef<AccountingVoucher[]>([]);
   const yearDataByKeyRef = useRef<Record<YearKey, YearData>>({});
   const activeYearKeyRef = useRef<YearKey>('');
 
@@ -3296,6 +3439,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   }, [journalEntries]);
 
   useEffect(() => {
+    fundTransactionsRef.current = fundTransactions;
+  }, [fundTransactions]);
+
+  useEffect(() => {
+    accountingVouchersRef.current = accountingVouchers;
+  }, [accountingVouchers]);
+
+  useEffect(() => {
     yearDataByKeyRef.current = yearDataByKey;
   }, [yearDataByKey]);
 
@@ -3349,23 +3500,54 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   }, [deletedEntityTombstones]);
 
   const loadYearDataIntoState = (yd: YearData, warehouseList: Warehouse[] = warehouses) => {
-    const normalizedYearData = stripDeletedFromYearData(
+    let normalizedYearData = stripDeletedFromYearData(
       normalizeYearDataPaymentAccounts(yd),
       deletedEntityTombstonesRef.current,
     );
     const defaultWarehouseId = getDefaultWarehouseId(warehouseList);
-    setAccountingPeriods(normalizedYearData.accountingPeriods || []);
-    setInvoices(normalizedYearData.invoices || []);
-    setInventory(
-      normalizeInventoryRows(
-        normalizedYearData.inventory || [],
-        defaultWarehouseId,
-      ),
+    const repairedInventory = reconcileMissingInventoryFromTransactions(
+      normalizeInventoryRows(normalizedYearData.inventory || [], defaultWarehouseId),
+      inventoryCatalogRef.current,
+      normalizedYearData.transactions || [],
+      defaultWarehouseId,
     );
-    setJournalEntries(normalizedYearData.journalEntries || []);
-    setTransactions(normalizedYearData.transactions || []);
-    setFundTransactions(normalizedYearData.fundTransactions || []);
-    setAccountingVouchers(normalizedYearData.accountingVouchers || []);
+    if (repairedInventory.revivedIds.length > 0) {
+      normalizedYearData = {
+        ...normalizedYearData,
+        inventory: repairedInventory.inventory,
+      };
+      const revived = new Set(repairedInventory.revivedIds.map(String));
+      const stripRevivedInventoryTombstones = (prev: DeletedEntityTombstones): DeletedEntityTombstones => {
+        const current = prev.inventory || [];
+        if (!current.some((id) => revived.has(String(id)))) return prev;
+        const nextInventory = current.filter((id) => !revived.has(String(id)));
+        const next = { ...prev };
+        if (nextInventory.length > 0) next.inventory = nextInventory;
+        else delete next.inventory;
+        return next;
+      };
+      deletedEntityTombstonesRef.current = stripRevivedInventoryTombstones(deletedEntityTombstonesRef.current);
+      setDeletedEntityTombstones(stripRevivedInventoryTombstones);
+    }
+    setAccountingPeriods(normalizedYearData.accountingPeriods || []);
+    const nextInvoices = normalizedYearData.invoices || [];
+    const nextInventory = normalizeInventoryRows(normalizedYearData.inventory || [], defaultWarehouseId);
+    const nextJournalEntries = normalizedYearData.journalEntries || [];
+    const nextTransactions = normalizedYearData.transactions || [];
+    const nextFundTransactions = normalizedYearData.fundTransactions || [];
+    const nextAccountingVouchers = normalizedYearData.accountingVouchers || [];
+    invoicesRef.current = nextInvoices;
+    inventoryRef.current = nextInventory;
+    journalEntriesRef.current = nextJournalEntries;
+    transactionsRef.current = nextTransactions;
+    fundTransactionsRef.current = nextFundTransactions;
+    accountingVouchersRef.current = nextAccountingVouchers;
+    setInvoices(nextInvoices);
+    setInventory(nextInventory);
+    setJournalEntries(nextJournalEntries);
+    setTransactions(nextTransactions);
+    setFundTransactions(nextFundTransactions);
+    setAccountingVouchers(nextAccountingVouchers);
     setProductionOrders(normalizedYearData.productionOrders || []);
     setDocumentNumberCounters((normalizedYearData.documentNumberCounters && typeof normalizedYearData.documentNumberCounters === 'object') ? normalizedYearData.documentNumberCounters : {});
     setCashFlowOpening(normalizedYearData.cashFlowOpening || {});
@@ -3785,6 +3967,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         if (legacyHotelPms) clearHotelPmsState();
       }
     }
+    {
+      const hasDeliveryKey = Object.prototype.hasOwnProperty.call(s, 'delivery');
+      if (hasDeliveryKey) {
+        setDeliveryState(normalizeDeliveryState((s as any).delivery));
+      } else {
+        setDeliveryState(getDefaultDeliveryState());
+      }
+    }
     if (s.catalogBackupSnapshot && typeof s.catalogBackupSnapshot === 'object') {
       const c = s.catalogBackupSnapshot as Record<string, unknown>;
       const defaultWhForBackup = getDefaultWarehouseId(loadedWarehouses);
@@ -3846,12 +4036,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         setInventoryCatalog(
           filterTombstonedByField(
             normalizeInventoryRows(s.inventoryCatalog as InventoryItem[], defaultWhId),
-            tombstonesRaw,
+            deletedEntityTombstonesRef.current,
             'inventory',
           ),
         );
       } else {
-        const inv = active.inventory || [];
+        const inv = inventoryRef.current || [];
         setInventoryCatalog(
           normalizeInventoryRows(
             inv.map((i: InventoryItem) => ({ ...i })),
@@ -3913,12 +4103,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
               s.inventoryCatalog as InventoryItem[],
               getDefaultWarehouseId(loadedWarehouses),
             ),
-            tombstonesRaw,
+            deletedEntityTombstonesRef.current,
             'inventory',
           ),
         );
       } else {
-        const inv = activeLegacy.inventory || [];
+        const inv = inventoryRef.current || [];
         setInventoryCatalog(
           normalizeInventoryRows(
             inv.map((i: InventoryItem) => ({ ...i })),
@@ -3936,7 +4126,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return;
     }
     if (opts?.remote) {
-      suppressPersistUntilRef.current = Date.now() + 600;
+      suppressPersistUntilRef.current = Date.now() + 250;
       remoteEchoBodyRef.current = null;
     }
     const liteRemote = opts?.lite && opts?.remote;
@@ -4410,7 +4600,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   );
 
   const handleRemoteStateSignal = useCallback(
-    (data: { revision?: number; sourceClientId?: string; kinds?: string[]; entity?: unknown }) => {
+    (data: {
+      revision?: number;
+      dataVersion?: number;
+      sourceClientId?: string;
+      kinds?: string[];
+      entity?: unknown;
+      state?: unknown;
+    }) => {
       if (!data || typeof data.revision !== 'number') return;
       if (data.kinds?.includes('connected')) {
         lastKnownStateRevisionRef.current = Math.max(
@@ -4428,6 +4625,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
       if (data.revision <= lastKnownStateRevisionRef.current) return;
       lastKnownStateRevisionRef.current = data.revision;
+      if (typeof data.dataVersion === 'number' && Number.isFinite(data.dataVersion)) {
+        stateDataVersionRef.current = data.dataVersion;
+      }
 
       const entity = data.entity as { action?: string; entityType?: string; entityId?: string } | undefined;
       const lifecycleApplied =
@@ -4465,6 +4665,25 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         return;
       }
 
+      const inlineState = data.state && typeof data.state === 'object' ? data.state : null;
+      if (inlineState && data.kinds?.includes('state')) {
+        if (persistInFlightRef.current > 0 || persistPendingRef.current) {
+          scheduleRemoteStateReloadRef.current();
+          return;
+        }
+        try {
+          remoteEchoBodyRef.current = JSON.stringify(stripOpeningDataFromStateSnapshot(inlineState));
+        } catch {
+          remoteEchoBodyRef.current = null;
+        }
+        suppressPersistUntilRef.current = Date.now() + 250;
+        applyStateFromBackend(inlineState);
+        setOpeningPersistReady(true);
+        setBackendAvailable(true);
+        setPersistStatus((s0) => ({ ...s0, lastError: undefined }));
+        return;
+      }
+
       if (
         (data.kinds?.includes('tax') ||
           data.kinds?.includes('rbac') ||
@@ -4476,7 +4695,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
       scheduleRemoteStateReloadRef.current();
     },
-    [removeFromStoreArray, purgeJournalEntriesAcrossYears],
+    [applyStateFromBackend, removeFromStoreArray, purgeJournalEntriesAcrossYears],
   );
 
   // Realtime sync: WebSocket từ server khi máy khác lưu dữ liệu.
@@ -4625,6 +4844,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       inventoryCatalog,
       bomDefinitions,
       hotelPms: hotelPmsState,
+      delivery: deliveryState,
       deletedEntityTombstones,
       entityDeletionAuditLog,
       ...(stateResetMarkerRef.current != null ? { stateResetMarker: stateResetMarkerRef.current } : {}),
@@ -4751,6 +4971,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     inventoryCatalog,
     bomDefinitions,
     hotelPmsState,
+    deliveryState,
     deletedEntityTombstones,
     entityDeletionAuditLog,
     persistNonce,
@@ -5801,12 +6022,22 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const jeDetails = buildInvoicePostingDetails(invoiceToSave);
     const ledgerDate = String(invoiceToSave.accountingPostingDate || invoiceToSave.date || '').split('T')[0];
     const jeDescriptionBase = `${isPurchase ? 'Mua hàng' : 'Bán hàng'} - HĐ số: ${invoiceToSave.invoiceNumber || newId}`;
+    const detailDescription = (invoiceToSave.details || [])
+      .map(describeInvoiceLineForLedger)
+      .filter(Boolean)
+      .slice(0, 6)
+      .join('; ');
     const jeDescription =
       useCrossPeriod
         ? `${jeDescriptionBase} [HĐ khác niên độ — kỳ gốc chứng từ ${postingDate}]`
         : useSameFyLateTax
           ? `${jeDescriptionBase} [Sổ kỳ phát sinh ${postingDate} — kê khai thuế kỳ ${crossAnalysis.discoveryPostingDate}]`
           : jeDescriptionBase;
+    const fullJeDescription = [
+      jeDescription,
+      invoiceToSave.description,
+      detailDescription ? `Chi tiết: ${detailDescription}${(invoiceToSave.details || []).length > 6 ? '; ...' : ''}` : '',
+    ].filter(Boolean).join(' | ');
     const paidFundMethod = invoiceToSave.status === 'PAID'
       ? resolveFundMethodFromPaymentMethod(invoiceToSave.paymentMethod, invoiceToSave.bankLedgerAccountCode)
       : null;
@@ -5819,7 +6050,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         id: `JE-INV-${newId}`,
         date: ledgerDate,
         referenceId: invoiceToSave.invoiceNumber || newId,
-        description: jeDescription,
+        description: fullJeDescription,
         details: jeDetails,
       };
       const cogsBuild = buildInvoiceCogsJournalEntry(invoiceToSave, inventoryCatalogRef.current, ledgerDate);
@@ -5844,7 +6075,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           method: paidFundMethod,
         amount: invoiceToSave.totalAmount,
         payerReceiver: invoiceToSave.customerName,
-        description: `${isPurchase ? 'Thanh toán' : 'Thu tiền'} hóa đơn ${invoiceToSave.invoiceNumber || newId}`,
+        description: [
+          `${isPurchase ? 'Thanh toán' : 'Thu tiền'} hóa đơn ${invoiceToSave.invoiceNumber || newId}`,
+          invoiceToSave.description,
+        ].filter(Boolean).join(' — '),
         category: isPurchase ? 'Chi mua hàng hóa' : 'Doanh thu bán hàng',
         status: 'COMPLETED',
         referenceDoc: invoiceToSave.invoiceNumber || newId,
@@ -6000,6 +6234,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const inventoryIdSet = new Set(
       (payload.inventoryItemIds || []).map((id) => String(id || '')).filter(Boolean),
     );
+    const serviceSummary = (payload.services || [])
+      .filter((service) => Number(service.quantity || 0) > 0 && Number(service.price || 0) > 0)
+      .map((service) => {
+        const revenueAccount = resolveBookingServiceRevenueAccount(service, inventoryIdSet);
+        const label = revenueAccount === '5111' ? 'Minibar' : 'Dịch vụ';
+        const vatRate = Number(service.vatRate || 0);
+        return `${label}: ${service.name} x ${Number(service.quantity || 0)} @ ${formatCurrency(Number(service.price || 0))}${vatRate > 0 ? `, VAT ${vatRate}%` : ''}`;
+      });
 
     payload.services.forEach((service, index) => {
       const quantity = Number(service.quantity || 0);
@@ -6024,8 +6266,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         inventoryItemId: lineType === 'GOODS' ? service.serviceId : undefined,
         note:
           revenueAccount === '5111'
-            ? 'Minibar / hàng hóa — Hotel PMS'
-            : 'Dịch vụ phòng — Hotel PMS',
+            ? `Minibar / hàng hóa — Hotel PMS${vatRate > 0 ? ` · VAT ${vatRate}%` : ''}`
+            : `Dịch vụ phòng — Hotel PMS${vatRate > 0 ? ` · VAT ${vatRate}%` : ''}`,
         tt58IndustryId: 'personal_service',
       });
     });
@@ -6055,6 +6297,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     const invoiceNumber = `HTL-${payload.roomNumber}-${String(payload.bookingId).slice(-6)}`;
+    const checkoutDescription = [
+      `Thanh toán phòng ${payload.roomNumber} — Hotel PMS [BK:${payload.bookingId}]`,
+      serviceSummary.length > 0 ? `Dịch vụ/Minibar: ${serviceSummary.join('; ')}` : '',
+    ].filter(Boolean).join(' | ');
     return handleCreateInvoice({
       id: invoiceId,
       invoiceNumber,
@@ -6070,7 +6316,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       paymentMethod: paymentLabel,
       bankAccountId: payload.bankAccountId,
       bankLedgerAccountCode: payload.bankLedgerAccountCode,
-      description: `Thanh toán phòng ${payload.roomNumber} — Hotel PMS [BK:${payload.bookingId}]`,
+      description: checkoutDescription,
       tt58IndustryId: 'personal_service',
       details,
     });
@@ -7253,16 +7499,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const defaultWarehouseId = getDefaultWarehouseId(activeWarehouses);
     const warehouseById = new Map(activeWarehouses.map((warehouse) => [warehouse.id, warehouse]));
 
-    let workingInventory = normalizeInventoryRows(inventory, defaultWarehouseId).map(item => ({
+    let workingInventory = normalizeInventoryRows(inventoryRef.current, defaultWarehouseId).map(item => ({
       ...item,
       serials: [...(item.serials || [])],
       serialDetails: [...(item.serialDetails || [])],
       warehouseBalances: cloneWarehouseBalances(item.warehouseBalances),
     }));
-    let workingTransactions = [...transactions];
-    let workingInvoices = [...invoices];
-    let workingJournalEntries = [...journalEntries];
-    let workingFundTransactions = [...fundTransactions];
+    let workingTransactions = [...transactionsRef.current];
+    let workingInvoices = [...invoicesRef.current];
+    let workingJournalEntries = [...journalEntriesRef.current];
+    let workingFundTransactions = [...fundTransactionsRef.current];
+    const workingAccountingVouchers = [...accountingVouchersRef.current];
     const stockBatchTouchedItemIds = new Set<string>();
 
     for (let batchIndex = 0; batchIndex < orderedPayloads.length; batchIndex++) {
@@ -7946,7 +8193,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         invoices: workingInvoices,
         journalEntries: workingJournalEntries,
         fundTransactions: workingFundTransactions,
-        accountingVouchers,
+        accountingVouchers: workingAccountingVouchers,
       },
     } as Record<YearKey, YearData>;
 
@@ -7957,6 +8204,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     transactionsRef.current = workingTransactions;
     invoicesRef.current = workingInvoices;
     journalEntriesRef.current = workingJournalEntries;
+    fundTransactionsRef.current = workingFundTransactions;
+    accountingVouchersRef.current = workingAccountingVouchers;
     yearDataByKeyRef.current = nextYearDataByKey;
     persistPendingRef.current = true;
     remoteEchoBodyRef.current = null;
@@ -7968,6 +8217,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setInvoices(workingInvoices);
     setJournalEntries(workingJournalEntries);
     setFundTransactions(workingFundTransactions);
+    setAccountingVouchers(workingAccountingVouchers);
     setYearDataByKey(nextYearDataByKey);
     return true;
   };
@@ -8270,8 +8520,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     persistEpochRef.current += 1;
     const nextTransactions = applyTrx(transactionsRef.current);
     const nextInvoices = applyInv(invoicesRef.current);
+    const nextAccountingVouchers = applyVoucher(accountingVouchersRef.current);
     const nextJournalEntries = applyJe(journalEntriesRef.current);
-    const nextFundTransactions = applyFund(fundTransactions);
+    const nextFundTransactions = applyFund(fundTransactionsRef.current);
     const nextInventory = applyInventory(inventoryRef.current);
     const nextInventoryCatalog = applyInventory(inventoryCatalogRef.current);
     const nextYearDataByKey = (() => {
@@ -8294,14 +8545,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     transactionsRef.current = nextTransactions;
     invoicesRef.current = nextInvoices;
+    accountingVouchersRef.current = nextAccountingVouchers;
     journalEntriesRef.current = nextJournalEntries;
+    fundTransactionsRef.current = nextFundTransactions;
     inventoryRef.current = nextInventory;
     inventoryCatalogRef.current = nextInventoryCatalog;
     yearDataByKeyRef.current = nextYearDataByKey;
+    persistPendingRef.current = true;
+    suppressPersistUntilRef.current = 0;
+    remoteEchoBodyRef.current = null;
+    setPersistNonce((n) => n + 1);
 
     setTransactions(nextTransactions);
     setInvoices(nextInvoices);
-    setAccountingVouchers(applyVoucher);
+    setAccountingVouchers(nextAccountingVouchers);
     setJournalEntries(nextJournalEntries);
     setFundTransactions(nextFundTransactions);
     setInventory(nextInventory);
@@ -8890,7 +9147,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         }
       }
 
-      setTransactions(prev => prev.filter(x => !peerIds.has(x.id)));
+      const nextInventory =
+        !forceSkipInventoryRollback && !skipOuterInventorySet
+          ? workingInv
+          : inventoryRef.current;
+      const nextTransactions = transactionsRef.current.filter(x => !peerIds.has(x.id));
+      let nextInvoices = [...invoicesRef.current];
+      let nextAccountingVouchers = [...accountingVouchersRef.current];
+      let nextJournalEntries = [...journalEntriesRef.current];
+      let nextFundTransactions = [...fundTransactionsRef.current];
 
       if (batchId) {
         const head = peerTrxs[0];
@@ -8899,124 +9164,96 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         if (head.type === 'IMPORT') {
           const invPurId = `INV-PUR-BATCH-${batchId}`;
           const vouId = `VOU-INV-${invPurId}`;
-          setInvoices(prev => prev.filter(inv => inv.id !== invPurId));
-          setAccountingVouchers(prev => prev.filter(v => v.id !== vouId));
-          setJournalEntries(prev =>
-            prev.filter(je => {
+          nextInvoices = nextInvoices.filter(inv => inv.id !== invPurId);
+          nextAccountingVouchers = nextAccountingVouchers.filter(
+            v => v.id !== vouId && v.id !== `VOU-INV-INV-PUR-BATCH-${batchId}`,
+          );
+          nextJournalEntries =
+            nextJournalEntries.filter(je => {
               const jid = String(je.id || '');
               const jref = String(je.referenceId || '');
               if (jid === `JE-IM-BATCH-${batchId}`) return false;
               if (jid === `JE-VOU-${vouId}`) return false;
+              if (jid === `JE-VOU-VOU-INV-INV-PUR-BATCH-${batchId}`) return false;
               if (vn && jref === vn) return false;
               if (dr && jref === dr) return false;
               return true;
-            }),
-          );
-          setFundTransactions(prev =>
-            prev.filter(ft => {
+            });
+          nextFundTransactions =
+            nextFundTransactions.filter(ft => {
               const fid = String(ft.id || '');
               if (fid === `FT-PUR-BATCH-${batchId}`) return false;
               if (fid === `FT-INV-${invPurId}`) return false;
               if (vn && (ft.referenceDoc === vn || ft.voucherNumber === vn)) return false;
               if (dr && ft.referenceDoc === dr) return false;
               return true;
-            }),
-          );
+            });
         } else {
           const invSalId = `INV-SALES-BATCH-${batchId}`;
           const vouId = `VOU-INV-${invSalId}`;
-          setInvoices(prev => prev.filter(inv => inv.id !== invSalId));
-          setAccountingVouchers(prev => prev.filter(v => v.id !== vouId));
-          setJournalEntries(prev =>
-            prev.filter(je => {
+          nextInvoices = nextInvoices.filter(inv => inv.id !== invSalId);
+          nextAccountingVouchers = nextAccountingVouchers.filter(
+            v => v.id !== vouId && v.id !== `VOU-INV-INV-SALES-BATCH-${batchId}`,
+          );
+          nextJournalEntries =
+            nextJournalEntries.filter(je => {
               const jid = String(je.id || '');
               const jref = String(je.referenceId || '');
               if (jid === `JE-EX-COST-BATCH-${batchId}`) return false;
               if (jid === `JE-EX-REV-BATCH-${batchId}`) return false;
               if (jid === `JE-VOU-${vouId}`) return false;
+              if (jid === `JE-VOU-VOU-INV-INV-SALES-BATCH-${batchId}`) return false;
               if (vn && jref === vn) return false;
               if (dr && jref === dr) return false;
               return true;
-            }),
-          );
-          setFundTransactions(prev =>
-            prev.filter(ft => {
+            });
+          nextFundTransactions =
+            nextFundTransactions.filter(ft => {
               const fid = String(ft.id || '');
               if (fid === `FT-SALES-BATCH-${batchId}`) return false;
               if (fid === `FT-INV-${invSalId}`) return false;
               if (vn && (ft.referenceDoc === vn || ft.voucherNumber === vn)) return false;
               if (dr && ft.referenceDoc === dr) return false;
               return true;
-            }),
-          );
+            });
         }
       } else {
         const linkedInvId = trx.type === 'IMPORT' ? `INV-PUR-${trxId}` : `INV-SALES-${trxId}`;
         const linkedVouId = `VOU-INV-${linkedInvId}`;
-        setInvoices(prev =>
-          prev.filter(inv => {
+        nextInvoices =
+          nextInvoices.filter(inv => {
             if (!inv) return true;
             const invNo = (inv as Invoice).invoiceNumber || '';
             if (invNo === ref || (sourceRef && invNo === sourceRef) || (voucherRef && invNo === voucherRef)) return false;
             if (inv.id === linkedInvId) return false;
             return true;
-          }),
-        );
-        setAccountingVouchers(prev => prev.filter(v => v.id !== linkedVouId));
-        setJournalEntries(prev =>
-          prev.filter(je => {
+          });
+        nextAccountingVouchers = nextAccountingVouchers.filter(v => v.id !== linkedVouId);
+        nextJournalEntries =
+          nextJournalEntries.filter(je => {
             if (je.referenceId === ref || je.referenceId === sourceRef || je.referenceId === voucherRef || je.referenceId === trxId) return false;
             if (je.id === `JE-IM-${trxId}`) return false;
             if (je.id === `JE-EX-COST-${trxId}`) return false;
             if (je.id === `JE-EX-REV-${trxId}`) return false;
             if (je.id === `JE-VOU-${linkedVouId}`) return false;
             return true;
-          }),
-        );
-        setFundTransactions(prev =>
-          prev.filter(ft => {
+          });
+        nextFundTransactions =
+          nextFundTransactions.filter(ft => {
             if (ft.referenceDoc === ref || ft.referenceDoc === sourceRef || ft.referenceDoc === voucherRef || ft.voucherNumber === ref || ft.voucherNumber === voucherRef || ft.referenceDoc === trxId) return false;
             if (ft.id === `FT-PUR-${trxId}`) return false;
             if (ft.id === `FT-SALES-${trxId}`) return false;
             if (ft.id === `FT-INV-${linkedInvId}`) return false;
             return true;
-          }),
-        );
+          });
       }
 
-      setYearDataByKey((prev) => {
-        const out = { ...prev } as Record<YearKey, YearData>;
-        for (const k of Object.keys(out)) {
-          const slice = out[k];
-          if (!slice) continue;
-          out[k] = purgeWarehouseArtifactFromYearDataSlice(slice, {
-            peerIds,
-            peerTrxs: peerTrxsSnapshot,
-            batchId,
-            trxId: trx.id,
-            headType: peerTrxs[0]?.type,
-            ref,
-            sourceRef,
-            voucherRef,
-            isActiveBucket: k === activeYearKeyRef.current,
-          });
-        }
-        return out;
-      });
-      transactionsRef.current = transactionsRef.current.filter((x) => !peerIds.has(x.id));
-      invoicesRef.current = invoicesRef.current.filter(
-        (inv) => !lcItems.some((item) => item.storeType === 'invoices' && item.id === inv.id),
-      );
-      journalEntriesRef.current = journalEntriesRef.current.filter((je) => !journalLcIds.has(String(je.id || '')));
-      if (!forceSkipInventoryRollback && !skipOuterInventorySet) {
-        inventoryRef.current = workingInv;
-        inventoryCatalogRef.current = syncCatalogFromInventoryRows(
-          inventoryCatalogRef.current,
-          workingInv,
-          new Set(peerTrxs.map((t) => t.itemId).filter(Boolean)),
-        );
-      }
-      yearDataByKeyRef.current = Object.fromEntries(
+      const touchedItemIds = new Set(peerTrxs.map((t) => t.itemId).filter(Boolean));
+      const nextInventoryCatalog =
+        !forceSkipInventoryRollback && !skipOuterInventorySet
+          ? syncCatalogFromInventoryRows(inventoryCatalogRef.current, nextInventory, touchedItemIds)
+          : inventoryCatalogRef.current;
+      const nextYearDataByKey = Object.fromEntries(
         Object.entries(yearDataByKeyRef.current).map(([k, slice]) => [
           k,
           slice
@@ -9034,13 +9271,49 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             : slice,
         ]),
       ) as Record<YearKey, YearData>;
+      const activeKey = activeYearKeyRef.current || activeYearKey;
+      nextYearDataByKey[activeKey] = {
+        ...(nextYearDataByKey[activeKey] || buildEmptyYearData([])),
+        inventory: nextInventory,
+        transactions: nextTransactions,
+        invoices: nextInvoices,
+        journalEntries: nextJournalEntries,
+        fundTransactions: nextFundTransactions,
+        accountingVouchers: nextAccountingVouchers,
+      };
+
+      inventoryRef.current = nextInventory;
+      inventoryCatalogRef.current = nextInventoryCatalog;
+      transactionsRef.current = nextTransactions;
+      invoicesRef.current = nextInvoices;
+      journalEntriesRef.current = nextJournalEntries;
+      fundTransactionsRef.current = nextFundTransactions;
+      accountingVouchersRef.current = nextAccountingVouchers;
+      yearDataByKeyRef.current = nextYearDataByKey;
+      persistPendingRef.current = true;
+      suppressPersistUntilRef.current = Math.max(suppressPersistUntilRef.current, Date.now() + 300);
+      remoteEchoBodyRef.current = null;
+      setPersistNonce((n) => n + 1);
+
+      setInventory(nextInventory);
+      setInventoryCatalog(nextInventoryCatalog);
+      setTransactions(nextTransactions);
+      setInvoices(nextInvoices);
+      setJournalEntries(nextJournalEntries);
+      setFundTransactions(nextFundTransactions);
+      setAccountingVouchers(nextAccountingVouchers);
+      setYearDataByKey(nextYearDataByKey);
 
       const lc = await callLifecycleSoftDeleteMany(lcItems, 'xóa phiếu kho');
       if (!lc.ok) {
+        suppressPersistUntilRef.current = 0;
         scheduleRemoteStateReloadRef.current();
         if (!opts?.silent) window.alert(`Không thể đưa vào thùng rác: ${lc.error}`);
         return false;
       }
+      suppressPersistUntilRef.current = 0;
+      remoteEchoBodyRef.current = null;
+      setPersistNonce((n) => n + 1);
       if (!opts?.silent) notifySoftDeleted(ref || trxId);
 
       return true;
@@ -9981,7 +10254,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const handleUpdateCITLossRecord = (record: CITLossRecord) => setCitLossRecords(prev => prev.map(r => r.id === record.id ? record : r));
   const handleSaveVoucher = (
     voucher: AccountingVoucher,
-    opts?: { skipEditableDateCheck?: boolean; skipJournalEntry?: boolean }
+    opts?: { skipEditableDateCheck?: boolean; skipJournalEntry?: boolean; skipCashCheck?: boolean }
   ): { ok: boolean; finalVoucher?: AccountingVoucher } => {
     const postingDate = (voucher?.date || new Date().toISOString().split('T')[0]).split('T')[0];
     if (!opts?.skipEditableDateCheck && !assertEditableDate(postingDate, 'lưu chứng từ kế toán')) {
@@ -10054,7 +10327,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     // Chứng từ thu/chi gắn HĐ (VOU-INV-*) quyết toán 131/331: không chặn theo dư tiền trên sổ —
     // dư TK 111/112 thường chưa phản ánh thực tế khi mới ghi nhận thanh toán từ thẻ Hóa đơn.
     const isInvoiceSettlementVoucher = String(normalizedVoucher.id || '').startsWith('VOU-INV-');
-    if (!isInvoiceSettlementVoucher) {
+    if (!isInvoiceSettlementVoucher && !opts?.skipCashCheck) {
       const cashErr = validateCashNotOverdraft({
         details: normalizedVoucher.details,
         postingDate,
@@ -12032,6 +12305,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setHotelPmsState(getDefaultHotelPmsState());
     clearHotelPmsState();
     setHotelPmsResetNonce((n) => n + 1);
+    setDeliveryState(getDefaultDeliveryState());
   };
 
   // Hard reset: máy chủ xóa sạch toàn bộ dữ liệu (SQLite), sau đó tải lại trang để
@@ -12256,6 +12530,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     hotelPmsState,
     setHotelPmsState,
     refreshHotelPmsFromBackend,
+    deliveryState,
+    setDeliveryState,
   };
   return React.createElement(AppContext.Provider, { value }, children);
 };

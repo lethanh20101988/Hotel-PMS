@@ -11,12 +11,14 @@ export function envelopeToWire(envelope: RealtimeEnvelope): string {
     return JSON.stringify({
       eventId: envelope.id,
       revision: p.revision,
+      dataVersion: p.dataVersion,
       at: envelope.at,
       kinds: p.kinds,
       sourceClientId: p.sourceClientId,
       companyId: envelope.companyId,
       room: envelope.targetRooms[0],
       entity: p.entity,
+      state: p.state,
       event: envelope.type,
     });
   }

@@ -176,7 +176,19 @@ const FINANCIAL_REPORT_ITEMS: ReportMenuLeaf[] = [
   { id: 'NOTES', label: 'B09-DNN: Thuyết minh BCTC', icon: FileText },
 ];
 
-const MANAGEMENT_REPORT_ITEMS: ReportMenuLeaf[] = [
+export type ManagementReportType =
+  | 'MGMT_REVENUE'
+  | 'MGMT_PROFIT'
+  | 'MGMT_PERFORMANCE'
+  | 'MGMT_AR'
+  | 'MGMT_AP'
+  | 'MGMT_RENEWALS';
+
+export const MANAGEMENT_REPORT_ITEMS: Array<{
+  id: ManagementReportType;
+  label: string;
+  icon: React.ComponentType<{ className?: string }>;
+}> = [
   { id: 'MGMT_REVENUE', label: 'Doanh thu theo Thiết bị', icon: BarChart3 },
   { id: 'MGMT_RENEWALS', label: 'Báo cáo gia hạn', icon: History },
   { id: 'MGMT_AR', label: 'Nợ phải thu theo Khách hàng', icon: Users },
@@ -3662,6 +3674,80 @@ const DevicePerformanceReport = ({ devices }: { devices: Device[] }) => (
         <p className="text-sm">Tính năng đang phát triển.</p>
     </div>
 );
+
+/** Báo cáo quản trị — dùng chung cho TT133 và TT58/2026. */
+export function ManagementReportsContent({
+  reportId,
+  selectedYear,
+}: {
+  reportId: ManagementReportType;
+  selectedYear: number;
+}) {
+  const {
+    journalEntries,
+    invoices,
+    devices,
+    financialYear,
+    companyInfo,
+    customers,
+    suppliers,
+    fundTransactions,
+  } = useApp();
+
+  const safeEntries = asArray<JournalEntry>(journalEntries);
+  const safeInvoices = asArray<Invoice>(invoices);
+  const safeCustomers = asArray<Customer>(customers);
+  const safeSuppliers = asArray<Supplier>(suppliers);
+  const safeDevices = asArray<Device>(devices);
+  const safeFund = asArray<FundTransaction>(fundTransactions);
+
+  const safeFY = useMemo((): FinancialYear => {
+    const s = financialYear?.startDate;
+    const e = financialYear?.endDate;
+    if (typeof s === 'string' && s.length >= 8 && typeof e === 'string' && e.length >= 8) {
+      return { startDate: s, endDate: e };
+    }
+    const y = new Date().getFullYear();
+    return { startDate: `${y}-01-01`, endDate: `${y}-12-31` };
+  }, [financialYear?.startDate, financialYear?.endDate]);
+
+  switch (reportId) {
+    case 'MGMT_REVENUE':
+      return <RevenueByDeviceReport invoices={safeInvoices} />;
+    case 'MGMT_RENEWALS':
+      return <RenewalReport devices={safeDevices} defaultYear={selectedYear} companyInfo={companyInfo} />;
+    case 'MGMT_AR':
+      return (
+        <ReceivablesByCustomerReport
+          entries={safeEntries}
+          financialYear={safeFY}
+          invoices={safeInvoices}
+          customers={safeCustomers}
+          suppliers={safeSuppliers}
+          fundTransactions={safeFund}
+          companyInfo={companyInfo}
+        />
+      );
+    case 'MGMT_AP':
+      return (
+        <PayablesBySupplierReport
+          entries={safeEntries}
+          financialYear={safeFY}
+          invoices={safeInvoices}
+          suppliers={safeSuppliers}
+          customers={safeCustomers}
+          fundTransactions={safeFund}
+          companyInfo={companyInfo}
+        />
+      );
+    case 'MGMT_PROFIT':
+      return <ProfitByContractReport invoices={safeInvoices} />;
+    case 'MGMT_PERFORMANCE':
+      return <DevicePerformanceReport devices={safeDevices} />;
+    default:
+      return null;
+  }
+}
 
 // --- UTILS ---
 
